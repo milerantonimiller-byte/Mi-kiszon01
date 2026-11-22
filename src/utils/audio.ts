@@ -1,28 +1,222 @@
+export interface PlayableAudioHandle {
+  stop: () => void;
+  finished: Promise<void>;
+}
+
+const SILENT_WAV_DATA_URI =
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+
+let sharedPlaybackCtx: AudioContext | null = null;
+let sharedHtmlAudio: HTMLAudioElement | null = null;
+
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function playSilentBufferOnContext(ctx: AudioContext): void {
+  try {
+    const silentBuffer = ctx.createBuffer(1, 1, 22050);
+    const source = ctx.createBufferSource();
+    source.buffer = silentBuffer;
+    source.connect(ctx.destination);
+    source.start(0);
+  } catch {
+    // Ignore if context is not yet ready
+  }
+}
+
+export function getSharedPlaybackContext(): AudioContext {
+  if (!sharedPlaybackCtx || sharedPlaybackCtx.state === 'closed') {
+    sharedPlaybackCtx = createCompatAudioContext();
+  }
+  return sharedPlaybackCtx;
+}
+
 /**
- * Plays a base64-encoded WAV file returned from Gemini TTS (unary generateContent).
+ * Must be called synchronously inside a user gesture (click / tap / submit)
+ * to unlock both Web Audio AudioContext and HTML <audio> on iOS Safari & Android Chrome.
  */
-export function playBase64Wav(base64Audio: string): Promise<HTMLAudioElement> {
-  return new Promise((resolve, reject) => {
-    try {
-      const binary = atob(base64Audio);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
+export function unlockMobileAudio(): void {
+  try {
+    const ctx = getSharedPlaybackContext();
+    if (ctx.state === 'suspended') {
+      void ctx.resume().catch(() => {});
+    }
+    playSilentBufferOnContext(ctx);
+  } catch {
+    // Ignore Web Audio init failure before gesture
+  }
+
+  try {
+    if (typeof Audio !== 'undefined') {
+      if (!sharedHtmlAudio) {
+        sharedHtmlAudio = new Audio();
+        sharedHtmlAudio.preload = 'auto';
+        (sharedHtmlAudio as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
+        sharedHtmlAudio.setAttribute('playsinline', 'true');
       }
-      const blob = new Blob([bytes], { type: 'audio/wav' });
+      if (sharedHtmlAudio.paused && !sharedHtmlAudio.src) {
+        sharedHtmlAudio.src = SILENT_WAV_DATA_URI;
+        sharedHtmlAudio.muted = true;
+        const p = sharedHtmlAudio.play();
+        if (p && typeof p.then === 'function') {
+          p.then(() => {
+            if (sharedHtmlAudio) {
+              sharedHtmlAudio.pause();
+              sharedHtmlAudio.currentTime = 0;
+              sharedHtmlAudio.muted = false;
+              sharedHtmlAudio.removeAttribute('src');
+            }
+          }).catch(() => {
+            if (sharedHtmlAudio) {
+              sharedHtmlAudio.muted = false;
+            }
+          });
+        }
+      }
+    }
+  } catch {
+    // Ignore HTMLAudio priming failure
+  }
+}
+
+/**
+ * Plays a base64-encoded WAV/audio clip returned from Gemini TTS.
+ * Prefers the pre-unlocked Web Audio AudioContext (immune to iOS/Android async-fetch autoplay blocks)
+ * and falls back to a pre-unlocked HTMLAudioElement.
+ */
+export async function playBase64Wav(
+  base64Audio: string,
+  mimeType = 'audio/wav'
+): Promise<PlayableAudioHandle> {
+  const bytes = base64ToUint8Array(base64Audio);
+  if (bytes.length < 16) {
+    throw new Error('Otrzymano puste lub uszkodzone dane audio TTS.');
+  }
+
+  // Primary path: pre-unlocked Web Audio API (most reliable on mobile after async fetch)
+  try {
+    const ctx = getSharedPlaybackContext();
+    if (ctx.state === 'suspended') {
+      await ctx.resume();
+    }
+    const arrayBuffer = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(arrayBuffer).set(bytes);
+    const decoded = await ctx.decodeAudioData(arrayBuffer);
+    const source = ctx.createBufferSource();
+    source.buffer = decoded;
+    source.connect(ctx.destination);
+
+    let stopped = false;
+    let resolveFinished: (() => void) | null = null;
+    const finished = new Promise<void>((resolve) => {
+      resolveFinished = resolve;
+    });
+
+    source.onended = () => {
+      resolveFinished?.();
+      resolveFinished = null;
+    };
+    source.start(0);
+
+    return {
+      stop: () => {
+        if (stopped) return;
+        stopped = true;
+        try {
+          source.onended = null;
+          source.stop();
+        } catch {
+          // already stopped
+        }
+        resolveFinished?.();
+        resolveFinished = null;
+      },
+      finished,
+    };
+  } catch (webAudioErr) {
+    console.warn('Web Audio WAV decode/play fallback -> HTMLAudio:', webAudioErr);
+  }
+
+  // Fallback path: pre-unlocked HTMLAudioElement
+  return new Promise<PlayableAudioHandle>((resolve, reject) => {
+    try {
+      const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mimeType || 'audio/wav' });
       const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      audio.onended = () => {
+      const audio = sharedHtmlAudio || new Audio();
+      (audio as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
+      audio.setAttribute('playsinline', 'true');
+      audio.muted = false;
+      audio.src = url;
+
+      let settled = false;
+      let resolveFinished: (() => void) | null = null;
+      const finished = new Promise<void>((res) => {
+        resolveFinished = res;
+      });
+
+      const cleanup = () => {
         URL.revokeObjectURL(url);
+        audio.onended = null;
+        audio.onerror = null;
+        resolveFinished?.();
+        resolveFinished = null;
       };
-      audio.onerror = (err) => {
+
+      audio.onended = cleanup;
+      audio.onerror = () => {
         URL.revokeObjectURL(url);
-        reject(err);
+        const err = new Error('Nie udało się odtworzyć strumienia audio w przeglądarce.');
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+        resolveFinished?.();
+        resolveFinished = null;
       };
+
+      const handle: PlayableAudioHandle = {
+        stop: () => {
+          try {
+            audio.pause();
+            audio.currentTime = 0;
+          } catch {
+            // ignore
+          }
+          cleanup();
+        },
+        finished,
+      };
+
       audio
         .play()
-        .then(() => resolve(audio))
-        .catch(reject);
+        .then(() => {
+          if (!settled) {
+            settled = true;
+            resolve(handle);
+          }
+        })
+        .catch((playErr) => {
+          URL.revokeObjectURL(url);
+          if (!settled) {
+            settled = true;
+            reject(playErr);
+          }
+        });
     } catch (err) {
       reject(err);
     }
@@ -63,13 +257,55 @@ export function float32ToPcm16Base64(float32: Float32Array): string {
     const s = Math.max(-1, Math.min(1, float32[i]));
     int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
   }
-  const bytes = new Uint8Array(int16.buffer);
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  return uint8ArrayToBase64(new Uint8Array(int16.buffer));
+}
+
+/**
+ * Encodes buffered 16kHz mono Float32Array chunks into a standard 16-bit PCM WAV base64 string.
+ * Works identically across iOS Safari, Android Chrome, and Desktop without MediaRecorder codec quirks.
+ */
+export function encodePcm16ChunksToWavBase64(
+  chunks: Float32Array[],
+  sampleRate = 16000
+): string {
+  let totalSamples = 0;
+  for (const chunk of chunks) {
+    totalSamples += chunk.length;
   }
-  return btoa(binary);
+  const dataByteLength = totalSamples * 2;
+  const buffer = new ArrayBuffer(44 + dataByteLength);
+  const view = new DataView(buffer);
+
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataByteLength, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true); // PCM chunk size
+  view.setUint16(20, 1, true); // PCM format
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate
+  view.setUint16(32, 2, true); // block align
+  view.setUint16(34, 16, true); // bits per sample
+  writeString(36, 'data');
+  view.setUint32(40, dataByteLength, true);
+
+  let offset = 44;
+  for (const chunk of chunks) {
+    for (let i = 0; i < chunk.length; i++) {
+      const s = Math.max(-1, Math.min(1, chunk[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      offset += 2;
+    }
+  }
+
+  return uint8ArrayToBase64(new Uint8Array(buffer));
 }
 
 /**
@@ -101,13 +337,20 @@ export function createCompatAudioContext(preferredSampleRate?: number): AudioCon
 }
 
 /**
- * Gapless 24kHz PCM player for Gemini Live API audio output.
+ * Gapless 24kHz PCM player for Gemini Live API audio output with mobile resume queue.
  */
 export class LivePcmPlayer {
   private ctx: AudioContext | null = null;
   private nextStartTime = 0;
   private activeSources: AudioBufferSourceNode[] = [];
+  private pendingBuffers: AudioBuffer[] = [];
+  private resuming = false;
   private muted = false;
+  private onPlaybackBlocked?: (err: Error) => void;
+
+  constructor(onPlaybackBlocked?: (err: Error) => void) {
+    this.onPlaybackBlocked = onPlaybackBlocked;
+  }
 
   public setMuted(isMuted: boolean): void {
     this.muted = isMuted;
@@ -116,9 +359,17 @@ export class LivePcmPlayer {
     }
   }
 
+  public isPlaying(): boolean {
+    return this.activeSources.length > 0 || this.pendingBuffers.length > 0;
+  }
+
   public unlock(): void {
     try {
-      void this.ensureContext();
+      const ctx = this.ensureContext();
+      if (ctx.state === 'suspended') {
+        void ctx.resume().catch(() => {});
+      }
+      playSilentBufferOnContext(ctx);
     } catch {
       // Ignore if AudioContext cannot initialize before user interaction
     }
@@ -126,7 +377,10 @@ export class LivePcmPlayer {
 
   public resumeIfNeeded(): void {
     if (this.ctx && this.ctx.state === 'suspended') {
-      void this.ctx.resume();
+      void this.ctx
+        .resume()
+        .then(() => this.flushPendingBuffers())
+        .catch(() => {});
     }
   }
 
@@ -135,13 +389,37 @@ export class LivePcmPlayer {
       this.ctx = createCompatAudioContext(24000);
       this.nextStartTime = this.ctx.currentTime;
     }
-    if (this.ctx.state === 'suspended') {
-      void this.ctx.resume();
-    }
     return this.ctx;
   }
 
-  public enqueuePcmBase64(base64Pcm: string): void {
+  private scheduleBuffer(ctx: AudioContext, audioBuffer: AudioBuffer): void {
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+    if (this.nextStartTime < now || this.nextStartTime > now + 8) {
+      this.nextStartTime = now + 0.025;
+    }
+    source.start(this.nextStartTime);
+    this.nextStartTime += audioBuffer.duration;
+
+    this.activeSources.push(source);
+    source.onended = () => {
+      const idx = this.activeSources.indexOf(source);
+      if (idx !== -1) this.activeSources.splice(idx, 1);
+    };
+  }
+
+  private flushPendingBuffers(): void {
+    if (!this.ctx || this.ctx.state !== 'running' || this.muted) return;
+    while (this.pendingBuffers.length > 0) {
+      const buf = this.pendingBuffers.shift()!;
+      this.scheduleBuffer(this.ctx, buf);
+    }
+  }
+
+  public enqueuePcmBase64(base64Pcm: string, sampleRate = 24000): void {
     if (this.muted || !base64Pcm) return;
     try {
       const ctx = this.ensureContext();
@@ -158,31 +436,41 @@ export class LivePcmPlayer {
         float32[i] = int16[i] / 32768;
       }
 
-      const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
+      const safeRate = Number.isFinite(sampleRate) && sampleRate >= 8000 ? sampleRate : 24000;
+      const audioBuffer = ctx.createBuffer(1, float32.length, safeRate);
       audioBuffer.copyToChannel(float32, 0);
 
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(ctx.destination);
-
-      const now = ctx.currentTime;
-      if (this.nextStartTime < now || this.nextStartTime > now + 8) {
-        this.nextStartTime = now + 0.025;
+      if (ctx.state === 'suspended') {
+        this.pendingBuffers.push(audioBuffer);
+        if (!this.resuming) {
+          this.resuming = true;
+          ctx
+            .resume()
+            .then(() => {
+              this.resuming = false;
+              this.flushPendingBuffers();
+            })
+            .catch((err) => {
+              this.resuming = false;
+              this.onPlaybackBlocked?.(
+                err instanceof Error
+                  ? err
+                  : new Error('Przeglądarka zablokowała odtwarzanie dźwięku.')
+              );
+            });
+        }
+        return;
       }
-      source.start(this.nextStartTime);
-      this.nextStartTime += audioBuffer.duration;
 
-      this.activeSources.push(source);
-      source.onended = () => {
-        const idx = this.activeSources.indexOf(source);
-        if (idx !== -1) this.activeSources.splice(idx, 1);
-      };
-    } catch {
-      // Ignore transient corrupt audio frame without crashing playback
+      this.flushPendingBuffers();
+      this.scheduleBuffer(ctx, audioBuffer);
+    } catch (err) {
+      console.warn('PCM audio decode error:', err);
     }
   }
 
   public interrupt(): void {
+    this.pendingBuffers = [];
     for (const source of this.activeSources) {
       try {
         source.stop();
@@ -293,11 +581,9 @@ export class StoryTtsPlayer {
   }
 
   private ensureContext(): AudioContext {
-    if (!this.ctx || this.ctx.state === 'closed') {
-      this.ctx = createCompatAudioContext(24000);
-    }
+    this.ctx = getSharedPlaybackContext();
     if (this.ctx.state === 'suspended') {
-      void this.ctx.resume();
+      void this.ctx.resume().catch(() => {});
     }
     return this.ctx;
   }

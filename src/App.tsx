@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ExternalLink } from 'lucide-react';
 import { APIProvider } from '@vis.gl/react-google-maps';
 import {
   AlarmItem,
@@ -7,6 +6,7 @@ import {
   AssistantLanguage,
   BrowserArticleData,
   CameraFacingMode,
+  CommandResponse,
   DetachedWindowTab,
   DialTarget,
   ExternalAppLaunch,
@@ -14,7 +14,6 @@ import {
   FoodSearchResponse,
   LiveVideoMode,
   NotepadNote,
-  PhoneAppTarget,
   ReminderItem,
   StayBookingRecord,
   StayResult,
@@ -33,14 +32,13 @@ import {
 } from './types';
 import { Header } from './components/Header';
 import { VoiceDock } from './components/VoiceDock';
-import { ToolsTab } from './components/ToolsTab';
 import { FoodTab } from './components/FoodTab';
 import { StaysTab } from './components/StaysTab';
 import { TransitTab } from './components/TransitTab';
 import { DetachedWindowModal } from './components/DetachedWindowModal';
 import { AutoBookingModal } from './components/AutoBookingModal';
+import { WebSearchResultsPanel } from './components/WebSearchResultsPanel';
 import { WhatsappModal } from './components/WhatsappModal';
-import { BrowserModal } from './components/BrowserModal';
 import { DialerModal } from './components/DialerModal';
 import { CalculatorModal, evaluateMathExpression } from './components/CalculatorModal';
 import { NotepadModal } from './components/NotepadModal';
@@ -64,14 +62,42 @@ import {
 import {
   computeRmsLevel,
   createCompatAudioContext,
+  encodePcm16ChunksToWavBase64,
   float32ToPcm16Base64,
   LivePcmPlayer,
+  PlayableAudioHandle,
   playBase64Wav,
   playGentleChime,
   resampleFloat32,
   StoryPlaybackStatus,
   StoryTtsPlayer,
+  unlockMobileAudio,
 } from './utils/audio';
+
+async function parseApiJson<T>(res: Response, fallbackError: string): Promise<T> {
+  const rawText = await res.text();
+  let parsed: any = null;
+  if (rawText.trim()) {
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      parsed = null;
+    }
+  }
+  if (!res.ok) {
+    const serverMsg =
+      (parsed && typeof parsed.error === 'string' && parsed.error.trim()) ||
+      (parsed && typeof parsed.message === 'string' && parsed.message.trim()) ||
+      '';
+    throw new Error(
+      serverMsg || `${fallbackError} (HTTP ${res.status})`
+    );
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error(`${fallbackError} (pusta lub nieprawidłowa odpowiedź serwera).`);
+  }
+  return parsed as T;
+}
 
 const DEFAULT_WHATSAPP_CONTACTS: WhatsappContact[] = [
   { id: 'c1', name: 'Marek Kowalski', phone: '+49 176 23456781', role: 'Kierowca', selected: true, sent: false },
@@ -88,6 +114,12 @@ const STAY_BOOKINGS_STORAGE_KEY = 'miekiszon_stay_bookings_v1';
 const ALARMS_STORAGE_KEY = 'miekiszon_alarms_v1';
 const REMINDERS_STORAGE_KEY = 'miekiszon_reminders_v1';
 const NOTEPAD_STORAGE_KEY = 'miekiszon_notepad_notes_v1';
+
+function getInitialGreeting(lang: AssistantLanguage): string {
+  return lang === 'de'
+    ? 'Bereit. Live-Gespräch starten oder Befehl eingeben.'
+    : 'Gotowy. Uruchom rozmowę na żywo lub wpisz polecenie.';
+}
 
 function isValidMapsKey(raw?: string | null): string {
   const trimmed = (raw || '').trim();
@@ -124,10 +156,7 @@ export default function App() {
   const [coordinates, setCoordinates] = useState<{ lat: number; lng: number } | undefined>(
     undefined
   );
-  const [isGpsLocationActive, setIsGpsLocationActive] = useState(false);
-  const gpsLocationLabelRef = useRef<string>('');
   const [isLocating, setIsLocating] = useState(false);
-  const [gpsError, setGpsError] = useState<string | null>(null);
 
   // Bilingual language (pl / de) & voice gender (female / male)
   const [language, setLanguage] = useState<AssistantLanguage>(() => {
@@ -209,6 +238,17 @@ export default function App() {
   const [detachedWindow, setDetachedWindow] = useState<DetachedWindowTab>(null);
   const [isWhatsappModalOpen, setIsWhatsappModalOpen] = useState(false);
 
+  // Voice-controlled Browser, Web & Article Search state
+  const [isBrowserOpen, setIsBrowserOpen] = useState(false);
+  const [webSearchData, setWebSearchData] = useState<WebSearchResponse | null>(null);
+  const webSearchDataRef = useRef<WebSearchResponse | null>(null);
+  webSearchDataRef.current = webSearchData;
+  const [isWebSearchLoading, setIsWebSearchLoading] = useState(false);
+  const [webSearchError, setWebSearchError] = useState<string | null>(null);
+  const [activeArticle, setActiveArticle] = useState<BrowserArticleData | null>(null);
+  const [isArticleLoading, setIsArticleLoading] = useState(false);
+  const [articleError, setArticleError] = useState<string | null>(null);
+
   // Dialer, alarms, reminders, notepad, calculator, YouTube & external app launch
   const [dialTarget, setDialTarget] = useState<DialTarget | null>(null);
   const [alarms, setAlarms] = useState<AlarmItem[]>(() => {
@@ -263,17 +303,6 @@ export default function App() {
 
   const [lastLaunchedApp, setLastLaunchedApp] = useState<ExternalAppLaunch | null>(null);
 
-  // In-App Voice-Controlled Browser state & history
-  const [isBrowserOpen, setIsBrowserOpen] = useState(false);
-  const [browserQuery, setBrowserQuery] = useState('');
-  const [browserData, setBrowserData] = useState<WebSearchResponse | null>(null);
-  const [isBrowserLoading, setIsBrowserLoading] = useState(false);
-  const [browserError, setBrowserError] = useState<string | null>(null);
-  const [browserArticle, setBrowserArticle] = useState<BrowserArticleData | null>(null);
-  const [isBrowserArticleLoading, setIsBrowserArticleLoading] = useState(false);
-  const browserHistoryRef = useRef<Array<{ query: string; data: WebSearchResponse }>>([]);
-  const tabHistoryRef = useRef<TabId[]>([]);
-
   // Google Maps Platform key & quota state
   const [mapsApiKey, setMapsApiKey] = useState<string>(() =>
     isValidMapsKey(import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined)
@@ -289,10 +318,17 @@ export default function App() {
     []
   );
 
-  // Assistant voice state
+  // Assistant chat history & voice state (all conversation UI lives inside Asystent tab)
   const [isMuted, setIsMuted] = useState(false);
-  const [liveErrorMessage, setLiveErrorMessage] = useState<string | null>(null);
+  const [assistantReply, setAssistantReply] = useState<string>(() =>
+    getInitialGreeting(language)
+  );
+  const [userTranscript, setUserTranscript] = useState<string>('');
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
+  const [hasBufferedSpeech, setHasBufferedSpeech] = useState(false);
   const [isSpeakingTts, setIsSpeakingTts] = useState(false);
+  const [isCommandLoading, setIsCommandLoading] = useState(false);
 
   // Live API + Camera / Screen Share state
   const [isLiveActive, setIsLiveActive] = useState(false);
@@ -313,19 +349,26 @@ export default function App() {
   const liveInputBufRef = useRef('');
   const liveOutputBufRef = useRef('');
   const shouldStayLiveRef = useRef(false);
+  const voiceTransportModeRef = useRef<'live' | 'http'>('live');
   const liveReconnectTimerRef = useRef<number | null>(null);
   const livePingTimerRef = useRef<number | null>(null);
+  const wsStartupTimerRef = useRef<number | null>(null);
+  const liveResponseWatchdogRef = useRef<number | null>(null);
+  const liveTurnGotResponseRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
   const wsReadyReceivedRef = useRef(false);
   const wsStartupFailuresRef = useRef(0);
   const lastMicUiUpdateRef = useRef(0);
-  const voiceTransportRef = useRef<'none' | 'ws' | 'http_speech' | 'http_recorder'>('none');
-  const liveWebsocketCapableRef = useRef<boolean | null>(null);
-  const speechRecRef = useRef<any>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const recorderTimerRef = useRef<number | null>(null);
+
+  // Shared 16kHz PCM VAD & utterance buffer (drives end-of-speech signaling & HTTP fallback)
+  const vadPreRollRef = useRef<Float32Array[]>([]);
+  const vadSpeechChunksRef = useRef<Float32Array[]>([]);
+  const liveLastUtteranceRef = useRef<Float32Array[]>([]);
+  const vadSpeakingRef = useRef(false);
+  const vadSpeechStartMsRef = useRef(0);
+  const vadLastLoudMsRef = useRef(0);
+  const isSpeakingTtsRef = useRef(false);
   const isProcessingHttpVoiceRef = useRef(false);
-  const chunkHadVoiceRef = useRef(false);
 
   const liveVideoStreamRef = useRef<MediaStream | null>(null);
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
@@ -333,7 +376,7 @@ export default function App() {
   const videoCaptureCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoFrameIntervalRef = useRef<number | null>(null);
 
-  const activeAudioElRef = useRef<HTMLAudioElement | null>(null);
+  const activeAudioElRef = useRef<PlayableAudioHandle | null>(null);
 
   // Refs to avoid stale closures
   const locationRef = useRef(locationInput);
@@ -378,26 +421,6 @@ export default function App() {
   youtubeQueryRef.current = youtubeQuery;
   const activeYoutubeVideoRef = useRef(activeYoutubeVideo);
   activeYoutubeVideoRef.current = activeYoutubeVideo;
-  const isWhatsappModalOpenRef = useRef(isWhatsappModalOpen);
-  isWhatsappModalOpenRef.current = isWhatsappModalOpen;
-  const dialTargetRef = useRef(dialTarget);
-  dialTargetRef.current = dialTarget;
-  const autoBookingTargetRef = useRef(autoBookingTarget);
-  autoBookingTargetRef.current = autoBookingTarget;
-  const isCalculatorOpenRef = useRef(isCalculatorOpen);
-  isCalculatorOpenRef.current = isCalculatorOpen;
-  const isNotepadOpenRef = useRef(isNotepadOpen);
-  isNotepadOpenRef.current = isNotepadOpen;
-  const lastLaunchedAppRef = useRef(lastLaunchedApp);
-  lastLaunchedAppRef.current = lastLaunchedApp;
-  const isBrowserOpenRef = useRef(isBrowserOpen);
-  isBrowserOpenRef.current = isBrowserOpen;
-  const browserQueryRef = useRef(browserQuery);
-  browserQueryRef.current = browserQuery;
-  const browserDataRef = useRef(browserData);
-  browserDataRef.current = browserData;
-  const browserArticleRef = useRef(browserArticle);
-  browserArticleRef.current = browserArticle;
 
   useEffect(() => {
     try {
@@ -498,18 +521,11 @@ export default function App() {
     };
   }, [mapsApiKey]);
 
-  // Helper to switch active tab while recording full history stack
-  const switchTab = useCallback((nextTab: TabId, recordHistory = true) => {
+  // Helper to switch active tab while recording previousTab
+  const switchTab = useCallback((nextTab: TabId) => {
     if (activeTabRef.current !== nextTab) {
-      if (recordHistory) {
-        tabHistoryRef.current = [...tabHistoryRef.current, activeTabRef.current].slice(-20);
-        setPreviousTab(activeTabRef.current);
-        previousTabRef.current = activeTabRef.current;
-      } else {
-        const topPrev = tabHistoryRef.current[tabHistoryRef.current.length - 1] ?? null;
-        setPreviousTab(topPrev);
-        previousTabRef.current = topPrev;
-      }
+      setPreviousTab(activeTabRef.current);
+      previousTabRef.current = activeTabRef.current;
       setActiveTab(nextTab);
       activeTabRef.current = nextTab;
     }
@@ -521,6 +537,24 @@ export default function App() {
     []
   );
 
+  // Unlock Web Audio & HTML5 <audio> on the very first user tap/click on mobile devices
+  useEffect(() => {
+    const handleFirstGesture = () => {
+      unlockMobileAudio();
+      window.removeEventListener('pointerdown', handleFirstGesture);
+      window.removeEventListener('touchstart', handleFirstGesture);
+      window.removeEventListener('keydown', handleFirstGesture);
+    };
+    window.addEventListener('pointerdown', handleFirstGesture, { passive: true });
+    window.addEventListener('touchstart', handleFirstGesture, { passive: true });
+    window.addEventListener('keydown', handleFirstGesture, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', handleFirstGesture);
+      window.removeEventListener('touchstart', handleFirstGesture);
+      window.removeEventListener('keydown', handleFirstGesture);
+    };
+  }, []);
+
   // ---------------------------------------------------------------------------
   // TTS Playback (Polish or German, Female Kore or Male Charon)
   // ---------------------------------------------------------------------------
@@ -528,75 +562,84 @@ export default function App() {
     async (
       text: string,
       langOverride?: AssistantLanguage,
-      forceEvenIfLive = false
-    ): Promise<void> => {
+      forceWhenHttpVoice = false
+    ) => {
+      const cleanText = text.trim();
+      if (!cleanText || isMutedRef.current) return;
       if (
-        !text.trim() ||
-        isMutedRef.current ||
-        (isLiveActiveRef.current && !forceEvenIfLive)
+        isLiveActiveRef.current &&
+        voiceTransportModeRef.current === 'live' &&
+        !forceWhenHttpVoice
       ) {
         return;
       }
-      const targetLang = langOverride || languageRef.current;
+
       try {
         if (activeAudioElRef.current) {
-          activeAudioElRef.current.pause();
+          activeAudioElRef.current.stop();
           activeAudioElRef.current = null;
         }
         setIsSpeakingTts(true);
+        isSpeakingTtsRef.current = true;
         const res = await fetch('/api/assistant/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            text,
+            text: cleanText,
             voiceGender: voiceGenderRef.current,
-            language: targetLang,
+            language: langOverride || languageRef.current,
           }),
         });
-        if (!res.ok) throw new Error('TTS request failed');
-        const json = await res.json();
-        if (json.audioBase64 && !isMutedRef.current) {
-          const audio = await playBase64Wav(json.audioBase64);
-          activeAudioElRef.current = audio;
-          await new Promise<void>((resolve) => {
-            const finish = () => {
-              setIsSpeakingTts(false);
-              resolve();
-            };
-            audio.onended = finish;
-            audio.onerror = finish;
-            window.setTimeout(finish, 20000);
-          });
-        } else {
-          setIsSpeakingTts(false);
+        const json = await parseApiJson<{
+          audioBase64?: string;
+          mimeType?: string;
+          error?: string;
+        }>(
+          res,
+          (langOverride || languageRef.current) === 'de'
+            ? 'Sprachausgabe (TTS) fehlgeschlagen'
+            : 'Błąd syntezy mowy (TTS)'
+        );
+
+        if (!json.audioBase64) {
+          throw new Error(
+            (langOverride || languageRef.current) === 'de'
+              ? 'Der TTS-Server hat keine Audiodaten zurückgegeben.'
+              : 'Serwer TTS nie zwrócił danych audio.'
+          );
         }
-      } catch {
-        // Fallback to browser SpeechSynthesis if server TTS is unavailable
-        try {
-          if (
-            typeof window !== 'undefined' &&
-            'speechSynthesis' in window &&
-            !isMutedRef.current
-          ) {
-            window.speechSynthesis.cancel();
-            await new Promise<void>((resolve) => {
-              const utter = new SpeechSynthesisUtterance(text);
-              utter.lang = targetLang === 'de' ? 'de-DE' : 'pl-PL';
-              const finish = () => {
-                setIsSpeakingTts(false);
-                resolve();
-              };
-              utter.onend = finish;
-              utter.onerror = finish;
-              window.speechSynthesis.speak(utter);
-              window.setTimeout(finish, 12000);
-            });
-            return;
-          }
-        } catch {
-          // ignore SpeechSynthesis errors
+
+        if (isMutedRef.current) {
+          setIsSpeakingTts(false);
+          isSpeakingTtsRef.current = false;
+          return;
+        }
+
+        const handle = await playBase64Wav(json.audioBase64, json.mimeType || 'audio/wav');
+        activeAudioElRef.current = handle;
+        await handle.finished;
+        if (activeAudioElRef.current === handle) {
+          activeAudioElRef.current = null;
         }
         setIsSpeakingTts(false);
+        isSpeakingTtsRef.current = false;
+      } catch (err: any) {
+        setIsSpeakingTts(false);
+        isSpeakingTtsRef.current = false;
+        const activeLang = langOverride || languageRef.current;
+        const rawErr = String(err?.message || err || '');
+        const isAutoplayBlocked =
+          err?.name === 'NotAllowedError' || /autoplay|notallowed|gesture|interact/i.test(rawErr);
+        setVoiceError(
+          isAutoplayBlocked
+            ? activeLang === 'de'
+              ? 'Der Browser hat die Audiowiedergabe blockiert. Tippe auf „Erneut abspielen“.'
+              : 'Przeglądarka zablokowała automatyczne odtwarzanie dźwięku. Kliknij „Odtwórz głos”.'
+            : rawErr ||
+                (activeLang === 'de'
+                  ? 'Antwort konnte nicht vorgelesen werden.'
+                  : 'Nie udało się odtworzyć odpowiedzi głosowej.')
+        );
       }
     },
     []
@@ -668,7 +711,7 @@ export default function App() {
     async (
       locOverride?: string,
       catOverride?: FoodCategory,
-      coordsOverride?: { lat: number; lng: number } | null,
+      coordsOverride?: { lat: number; lng: number },
       countryOverride?: string
     ): Promise<FoodSearchResponse | null> => {
       const rawLoc = locOverride ?? locationRef.current;
@@ -678,14 +721,7 @@ export default function App() {
           ? `${loc} ${countryOverride}`.trim()
           : loc;
       const cat = catOverride ?? foodCategory;
-      const coords =
-        coordsOverride === null
-          ? undefined
-          : coordsOverride !== undefined
-            ? coordsOverride
-            : !loc || (gpsLocationLabelRef.current && loc === gpsLocationLabelRef.current)
-              ? coordinatesRef.current
-              : undefined;
+      const coords = coordsOverride ?? coordinatesRef.current;
       if (!loc && !coords) return null;
 
       setIsFoodLoading(true);
@@ -740,23 +776,14 @@ export default function App() {
     async (
       locOverride?: string,
       typeOverride?: StayType,
-      coordsOverride?: { lat: number; lng: number } | null,
+      coordsOverride?: { lat: number; lng: number },
       checkInOverride?: string,
       checkOutOverride?: string,
-      countryOverride?: string,
-      minPriceEurOverride?: number | null,
-      maxPriceEurOverride?: number | null
+      countryOverride?: string
     ): Promise<StaysSearchResponse | null> => {
       const loc = sanitizeCodeTokensInQuery(locOverride ?? locationRef.current, countryOverride);
       const st = typeOverride ?? stayType;
-      const coords =
-        coordsOverride === null
-          ? undefined
-          : coordsOverride !== undefined
-            ? coordsOverride
-            : !loc || (gpsLocationLabelRef.current && loc === gpsLocationLabelRef.current)
-              ? coordinatesRef.current
-              : undefined;
+      const coords = coordsOverride ?? coordinatesRef.current;
       const validIn = clampStayDate(checkInOverride ?? checkIn);
       const rawOut = clampStayDate(checkOutOverride ?? checkOut, addDaysToIso(validIn, 2));
       const validOut = rawOut <= validIn ? addDaysToIso(validIn, 1) : rawOut;
@@ -775,8 +802,6 @@ export default function App() {
             checkIn: validIn,
             checkOut: validOut,
             guests,
-            minPriceEur: minPriceEurOverride ?? null,
-            maxPriceEur: maxPriceEurOverride ?? null,
             coordinates: coords,
           }),
         });
@@ -841,6 +866,8 @@ export default function App() {
         setDetachedWindow('stays');
 
         if (json.summarySpeech) {
+          setAssistantReply(json.summarySpeech);
+          appendChatMessage('assistant', json.summarySpeech);
           void speakWithMiekiszon(json.summarySpeech);
         }
         return json;
@@ -848,12 +875,14 @@ export default function App() {
         const errMsg =
           err?.message || 'Nie udało się wykonać automatycznej rezerwacji noclegu.';
         setStaysError(errMsg);
+        setAssistantReply(errMsg);
+        appendChatMessage('assistant', errMsg);
         return null;
       } finally {
         setIsAutoBooking(false);
       }
     },
-    [checkIn, checkOut, guests, switchTab, speakWithMiekiszon]
+    [checkIn, checkOut, guests, switchTab, appendChatMessage, speakWithMiekiszon]
   );
 
   const performTransitSearch = useCallback(
@@ -908,20 +937,92 @@ export default function App() {
     [transitMode, transitFrom, transitTo]
   );
 
+  const performWebSearch = useCallback(
+    async (query: string, codeOnly = false): Promise<WebSearchResponse | null> => {
+      const normalizedQuery = codeOnly
+        ? stripHyphensForCodeOnly(query)
+        : sanitizeCodeTokensInQuery(query);
+      if (!normalizedQuery) return null;
+      setIsBrowserOpen(true);
+      setActiveArticle(null);
+      setArticleError(null);
+      setIsWebSearchLoading(true);
+      setWebSearchError(null);
+      try {
+        const res = await fetch('/api/search/web', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: normalizedQuery,
+            location: sanitizeCodeTokensInQuery(locationRef.current),
+            coordinates: coordinatesRef.current,
+            language: languageRef.current,
+            codeOnly,
+          }),
+        });
+        const data: WebSearchResponse = await res.json();
+        if (!res.ok) {
+          throw new Error((data as any).error || 'Nie udało się przeszukać internetu.');
+        }
+        setWebSearchData(data);
+        webSearchDataRef.current = data;
+        return data;
+      } catch (err: any) {
+        setWebSearchError(err?.message || 'Błąd przeszukiwania internetu.');
+        return null;
+      } finally {
+        setIsWebSearchLoading(false);
+      }
+    },
+    []
+  );
+
+  const openBrowserArticle = useCallback(
+    async (
+      item: WebSearchResultItem,
+      readAloud = false,
+      onReadText?: (speechText: string) => void
+    ): Promise<BrowserArticleData | null> => {
+      if (!item?.websiteUrl) return null;
+      setIsBrowserOpen(true);
+      setIsArticleLoading(true);
+      setArticleError(null);
+      try {
+        const res = await fetch('/api/browser/article', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: item.websiteUrl,
+            title: item.title,
+            summary: item.summary,
+            language: languageRef.current,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data?.error || 'Nie udało się otworzyć artykułu.');
+        }
+        const article: BrowserArticleData = data;
+        setActiveArticle(article);
+        if (readAloud && onReadText) {
+          const shortBody = article.content.slice(0, 750);
+          onReadText(`${article.title}. ${shortBody}`);
+        }
+        return article;
+      } catch (err: any) {
+        setArticleError(err?.message || 'Błąd wczytywania artykułu.');
+        return null;
+      } finally {
+        setIsArticleLoading(false);
+      }
+    },
+    []
+  );
+
   // Fast GPS Location Detection
   const detectFastLocation = useCallback(
     (autoSearch = false, manualTrigger = false, transitModeOverride?: TransitMode) => {
-      setGpsError(null);
-      if (typeof navigator === 'undefined' || !navigator.geolocation) {
-        if (manualTrigger) {
-          setGpsError(
-            languageRef.current === 'de'
-              ? 'Dieser Browser unterstützt keine GPS-Ortung. Bitte Stadt oder PLZ eingeben.'
-              : 'Twoja przeglądarka nie obsługuje funkcji GPS. Wpisz miasto lub kod pocztowy ręcznie.'
-          );
-        }
-        return;
-      }
+      if (!navigator.geolocation) return;
       setIsLocating(true);
       navigator.geolocation.getCurrentPosition(
         async (pos) => {
@@ -931,9 +1032,7 @@ export default function App() {
           };
           setCoordinates(coords);
           coordinatesRef.current = coords;
-          setGpsError(null);
           const activeTransitMode = transitModeOverride || transitMode;
-          const fallbackLabel = `GPS: ${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}`;
 
           try {
             const resp = await fetch(
@@ -949,13 +1048,11 @@ export default function App() {
               addr.city || addr.town || addr.village || ''
             }`.trim();
 
-            const finalLabel = resolved || fallbackLabel;
-            gpsLocationLabelRef.current = finalLabel;
-            setIsGpsLocationActive(true);
-            setLocationInput(finalLabel);
-            locationRef.current = finalLabel;
-            setTransitFrom((prev) => (manualTrigger ? finalLabel : prev || finalLabel));
-
+            if (resolved) {
+              setLocationInput(resolved);
+              locationRef.current = resolved;
+              setTransitFrom((prev) => prev || resolved);
+            }
             if (autoSearch || manualTrigger) {
               const targetLoc = resolved || '';
               if (activeTabRef.current === 'stays') {
@@ -971,12 +1068,6 @@ export default function App() {
               }
             }
           } catch {
-            gpsLocationLabelRef.current = fallbackLabel;
-            setIsGpsLocationActive(true);
-            setLocationInput((prev) => prev.trim() || fallbackLabel);
-            if (!locationRef.current.trim()) {
-              locationRef.current = fallbackLabel;
-            }
             if (autoSearch && (manualTrigger || activeTabRef.current === 'food')) {
               if (activeTabRef.current === 'stays') {
                 await performStaysSearch('', stayType, coords);
@@ -994,44 +1085,17 @@ export default function App() {
             setIsLocating(false);
           }
         },
-        (geoErr) => {
+        () => {
           setIsLocating(false);
-          if (manualTrigger || geoErr?.code === 1) {
-            setGpsError(
-              geoErr?.code === 1
-                ? languageRef.current === 'de'
-                  ? 'GPS-Zugriff im Browser blockiert — bitte Standortfreigabe erlauben oder PLZ/Stadt eingeben.'
-                  : 'Brak zgody na GPS w przeglądarce — zezwól na lokalizację lub wpisz miasto/kod ręcznie.'
-                : languageRef.current === 'de'
-                  ? 'GPS-Signal konnte nicht ermittelt werden. Bitte PLZ oder Stadt eingeben.'
-                  : 'Nie udało się pobrać sygnału GPS. Sprawdź ustawienia lokalizacji lub wpisz adres ręcznie.'
-            );
-          }
         },
-        {
-          enableHighAccuracy: manualTrigger,
-          maximumAge: manualTrigger ? 30000 : 300000,
-          timeout: 9000,
-        }
+        { enableHighAccuracy: false, maximumAge: 300000, timeout: 6000 }
       );
     },
     [foodCategory, stayType, transitMode, transitTo, performFoodSearch, performStaysSearch, performTransitSearch]
   );
 
   useEffect(() => {
-    if (typeof navigator === 'undefined') return;
-    if (navigator.permissions && typeof navigator.permissions.query === 'function') {
-      navigator.permissions
-        .query({ name: 'geolocation' as PermissionName })
-        .then((perm) => {
-          if (perm.state === 'granted') {
-            detectFastLocation(true, false);
-          }
-        })
-        .catch(() => {
-          // Wait for user GPS click if permissions query is unsupported
-        });
-    }
+    detectFastLocation(true, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1167,183 +1231,19 @@ export default function App() {
     async (nextLang: AssistantLanguage) => {
       setLanguage(nextLang);
       languageRef.current = nextLang;
+      const notice =
+        nextLang === 'de'
+          ? 'Sprache auf Deutsch umgestellt. Wie kann ich dir helfen?'
+          : 'Przełączono język asystenta na polski. W czym mogę pomóc?';
+      setAssistantReply(notice);
+      appendChatMessage('assistant', notice, nextLang);
 
       if (isLiveActiveRef.current) {
         stopLiveSessionRef.current();
         await startLiveSessionRef.current(voiceGenderRef.current, nextLang);
       }
     },
-    []
-  );
-
-  // ---------------------------------------------------------------------------
-  // In-App Browser & Step-Back Window Navigation Helpers
-  // ---------------------------------------------------------------------------
-  const performBrowserSearch = useCallback(
-    async (rawQuery: string, codeOnly = false, pushHistory = true) => {
-      const cleaned = rawQuery.trim();
-      if (!cleaned) return;
-      if (pushHistory && browserDataRef.current && browserQueryRef.current.trim()) {
-        browserHistoryRef.current = [
-          ...browserHistoryRef.current,
-          { query: browserQueryRef.current, data: browserDataRef.current },
-        ].slice(-12);
-      }
-      setIsBrowserOpen(true);
-      isBrowserOpenRef.current = true;
-      setBrowserQuery(cleaned);
-      browserQueryRef.current = cleaned;
-      setBrowserArticle(null);
-      browserArticleRef.current = null;
-      setBrowserError(null);
-      setIsBrowserLoading(true);
-      try {
-        const res = await fetch('/api/search/web', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            query: cleaned,
-            language: languageRef.current,
-            codeOnly,
-          }),
-        });
-        const json = await res.json();
-        if (!res.ok) {
-          throw new Error(json?.error || 'Nie udało się wyszukać w przeglądarce.');
-        }
-        setBrowserData(json);
-        browserDataRef.current = json;
-      } catch (err: any) {
-        setBrowserError(
-          parseFriendlyErrorMessage(err?.message, 'Błąd wyszukiwania w przeglądarce.')
-        );
-      } finally {
-        setIsBrowserLoading(false);
-      }
-    },
-    []
-  );
-
-  const performOpenBrowserArticle = useCallback(
-    async (item: WebSearchResultItem, readAloud = false) => {
-      const targetUrl = (item.websiteUrl || '').trim();
-      if (!/^https?:\/\//i.test(targetUrl)) return;
-      setIsBrowserOpen(true);
-      isBrowserOpenRef.current = true;
-      setBrowserError(null);
-      setIsBrowserArticleLoading(true);
-      try {
-        const res = await fetch('/api/browser/article', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: targetUrl,
-            title: item.title,
-            language: languageRef.current,
-          }),
-        });
-        const json = await res.json();
-        if (!res.ok) {
-          throw new Error(json?.error || 'Nie udało się otworzyć strony w przeglądarce.');
-        }
-        const articleObj: BrowserArticleData = {
-          url: json.url || targetUrl,
-          title: json.title || item.title,
-          domain: json.domain || 'Web',
-          content: json.content || item.summary || '',
-        };
-        setBrowserArticle(articleObj);
-        browserArticleRef.current = articleObj;
-        if (readAloud && articleObj.content) {
-          void speakWithMiekiszon(articleObj.content.slice(0, 750));
-        }
-      } catch (err: any) {
-        setBrowserError(
-          parseFriendlyErrorMessage(err?.message, 'Nie udało się pobrać artykułu.')
-        );
-      } finally {
-        setIsBrowserArticleLoading(false);
-      }
-    },
-    [speakWithMiekiszon]
-  );
-
-  const performGoBack = useCallback(
-    (steps = 1) => {
-      const count = Math.max(1, Math.min(steps, 10));
-      for (let i = 0; i < count; i++) {
-        if (isBrowserOpenRef.current) {
-          if (browserArticleRef.current) {
-            setBrowserArticle(null);
-            browserArticleRef.current = null;
-            continue;
-          }
-          if (browserHistoryRef.current.length > 0) {
-            const prevEntry = browserHistoryRef.current.pop()!;
-            setBrowserQuery(prevEntry.query);
-            browserQueryRef.current = prevEntry.query;
-            setBrowserData(prevEntry.data);
-            browserDataRef.current = prevEntry.data;
-            setBrowserError(null);
-            continue;
-          }
-          setIsBrowserOpen(false);
-          isBrowserOpenRef.current = false;
-          continue;
-        }
-
-        if (isWhatsappModalOpenRef.current) {
-          setIsWhatsappModalOpen(false);
-          isWhatsappModalOpenRef.current = false;
-          continue;
-        }
-        if (dialTargetRef.current) {
-          setDialTarget(null);
-          dialTargetRef.current = null;
-          continue;
-        }
-        if (autoBookingTargetRef.current) {
-          setAutoBookingTarget(null);
-          autoBookingTargetRef.current = null;
-          continue;
-        }
-        if (isCalculatorOpenRef.current) {
-          setIsCalculatorOpen(false);
-          isCalculatorOpenRef.current = false;
-          continue;
-        }
-        if (isNotepadOpenRef.current) {
-          setIsNotepadOpen(false);
-          isNotepadOpenRef.current = false;
-          continue;
-        }
-        if (lastLaunchedAppRef.current) {
-          setLastLaunchedApp(null);
-          lastLaunchedAppRef.current = null;
-          continue;
-        }
-        if (detachedWindowRef.current) {
-          setDetachedWindow(null);
-          detachedWindowRef.current = null;
-          if (tabHistoryRef.current.length > 0) {
-            const prevTab = tabHistoryRef.current.pop()!;
-            switchTab(prevTab, false);
-          } else if (activeTabRef.current !== 'assistant') {
-            switchTab('assistant', false);
-          }
-          continue;
-        }
-        if (tabHistoryRef.current.length > 0) {
-          const prevTab = tabHistoryRef.current.pop()!;
-          switchTab(prevTab, false);
-          continue;
-        }
-        if (activeTabRef.current !== 'assistant') {
-          switchTab('assistant', false);
-        }
-      }
-    },
-    [switchTab]
+    [appendChatMessage]
   );
 
   // ---------------------------------------------------------------------------
@@ -1356,34 +1256,28 @@ export default function App() {
       let handledOwnSpeech = false;
 
       for (const action of actions) {
-        if (action.type === 'go_back') {
-          performGoBack(action.steps || 1);
-        } else if (action.type === 'close_tab') {
-          const validTabs: TabId[] = ['assistant', 'food', 'stays', 'transit', 'tools'];
-          if (!action.targetTab) {
-            if (
-              isBrowserOpenRef.current ||
-              isWhatsappModalOpenRef.current ||
-              dialTargetRef.current ||
-              autoBookingTargetRef.current ||
-              isCalculatorOpenRef.current ||
-              isNotepadOpenRef.current ||
-              lastLaunchedAppRef.current ||
-              detachedWindowRef.current
-            ) {
-              performGoBack(1);
-              continue;
-            }
-          }
+        if (action.type === 'close_tab') {
+          const validTabs: TabId[] = ['assistant', 'food', 'stays', 'transit'];
           if (action.targetTab && validTabs.includes(action.targetTab)) {
             setDetachedWindow(null);
-            detachedWindowRef.current = null;
             switchTab(action.targetTab);
+          } else if (detachedWindowRef.current) {
+            const target: TabId =
+              previousTabRef.current && previousTabRef.current !== detachedWindowRef.current
+                ? previousTabRef.current
+                : 'assistant';
+            setDetachedWindow(null);
+            switchTab(target);
           } else {
-            performGoBack(1);
+            const fallbackTab: TabId =
+              previousTabRef.current && previousTabRef.current !== activeTabRef.current
+                ? previousTabRef.current
+                : 'assistant';
+            setDetachedWindow(null);
+            switchTab(fallbackTab);
           }
         } else if (action.type === 'navigate' && action.tab) {
-          const validTabs: TabId[] = ['assistant', 'food', 'stays', 'transit', 'tools'];
+          const validTabs: TabId[] = ['assistant', 'food', 'stays', 'transit'];
           const targetTab: TabId = validTabs.includes(action.tab)
             ? action.tab
             : 'assistant';
@@ -1415,7 +1309,6 @@ export default function App() {
           const rawNextLoc = actionLoc || locationRef.current;
           const nextLoc = sanitizeCodeTokensInQuery(rawNextLoc, action.country);
           if (actionLoc) {
-            setIsGpsLocationActive(false);
             setLocationInput(nextLoc);
             locationRef.current = nextLoc;
           }
@@ -1424,7 +1317,7 @@ export default function App() {
           latestFood = await performFoodSearch(
             nextLoc,
             cat,
-            actionLoc ? null : coordinatesRef.current,
+            coordinatesRef.current,
             action.country
           );
         } else if (action.type === 'search_stays') {
@@ -1449,9 +1342,7 @@ export default function App() {
             coordinatesRef.current,
             undefined,
             undefined,
-            action.country,
-            typeof action.minPriceEur === 'number' ? action.minPriceEur : null,
-            typeof action.maxPriceEur === 'number' ? action.maxPriceEur : null
+            action.country
           );
         } else if (action.type === 'auto_book_stay') {
           handledOwnSpeech = true;
@@ -1500,108 +1391,53 @@ export default function App() {
           );
           if (transitRes?.summarySpeech) {
             handledOwnSpeech = true;
+            setAssistantReply(transitRes.summarySpeech);
+            appendChatMessage('assistant', transitRes.summarySpeech);
             void speakWithMiekiszon(transitRes.summarySpeech);
           }
         } else if (action.type === 'web_search') {
-          if (action.query) {
-            await performBrowserSearch(action.query, Boolean(action.codeOnly), true);
-          }
-          if (action.autoRedirect && action.query) {
-            launchExternalApp(getAppLaunchInfo('chrome', action.query));
+          // Keep results right inside whichever window/tab the user is currently talking in (e.g. food, stays, transit, or assistant)
+          const webRes = await performWebSearch(action.query, Boolean(action.codeOnly));
+          if (webRes) {
+            if (webRes.answerSummary) {
+              handledOwnSpeech = true;
+              setAssistantReply(webRes.answerSummary);
+              appendChatMessage('assistant', webRes.answerSummary);
+              void speakWithMiekiszon(webRes.answerSummary);
+            }
+            if (action.autoRedirect && webRes.primaryRedirectUrl) {
+              launchExternalApp({
+                title: webRes.query,
+                url: webRes.primaryRedirectUrl,
+                appLabel: 'Strona internetowa',
+              });
+            }
           }
         } else if (action.type === 'dial') {
           triggerAndroidDial(action.target, latestFood, latestStays);
         } else if (action.type === 'prepare_whatsapp') {
-          if (action.action === 'close') {
-            setIsWhatsappModalOpen(false);
-            if (lastLaunchedAppRef.current?.appLabel === 'WhatsApp') {
-              setLastLaunchedApp(null);
+          const msgToSend = action.message || whatsappMessage;
+          if (action.message) {
+            setWhatsappMessage(action.message);
+          }
+          if (action.recipientFilter && action.recipientFilter !== 'all') {
+            const matched = findContactByName(action.recipientFilter);
+            if (matched) {
+              launchExternalApp({
+                title: `WhatsApp: ${matched.name}`,
+                url: buildWhatsappUrl(matched.phone, msgToSend),
+                appLabel: 'WhatsApp',
+              });
             }
-            continue;
           }
-          if (action.action === 'reset') {
-            setWhatsappContacts((prev) => prev.map((c) => ({ ...c, sent: false })));
-            setIsWhatsappModalOpen(true);
-            continue;
-          }
-          if (action.action === 'select_all') {
-            setWhatsappContacts((prev) => prev.map((c) => ({ ...c, selected: true })));
-            setIsWhatsappModalOpen(true);
-            continue;
-          }
-
-          const rawMsg = action.message || (action as { text?: string }).text;
-          const msgToSend = rawMsg || whatsappMessage;
-          if (rawMsg) {
-            setWhatsappMessage(rawMsg);
-          }
-
-          const filterVal = (
-            action.recipientFilter ||
-            (action as { contactName?: string; to?: string; target?: string }).contactName ||
-            (action as { to?: string }).to ||
-            (action as { target?: string }).target ||
-            ''
-          ).trim();
-          const phoneDigits = sanitizePhoneForTel(action.phone || filterVal);
-          const matched =
-            filterVal && filterVal.toLowerCase() !== 'all'
-              ? findContactByName(filterVal)
-              : undefined;
-          const fallbackContact =
-            !matched && phoneDigits.length < 8 && (action.sendNow || action.action === 'send')
-              ? contactsRef.current.find(
-                  (c) => c.selected && !c.sent && sanitizePhoneForTel(c.phone).length >= 8
-                ) ||
-                contactsRef.current.find(
-                  (c) => c.selected && sanitizePhoneForTel(c.phone).length >= 8
-                )
-              : undefined;
-
-          const resolvedContact = matched || fallbackContact;
-          const targetPhone = resolvedContact?.phone || (phoneDigits.length >= 8 ? phoneDigits : '');
-          const shouldSendNow =
-            Boolean(targetPhone) &&
-            (Boolean(action.sendNow) ||
-              action.action === 'send' ||
-              Boolean(matched) ||
-              phoneDigits.length >= 8);
-
-          if (shouldSendNow && targetPhone) {
-            const waUrl = buildWhatsappUrl(targetPhone, msgToSend);
-            launchExternalApp({
-              title: `WhatsApp: ${resolvedContact?.name || targetPhone}`,
-              url: waUrl,
-              appLabel: 'WhatsApp',
-            });
-            if (resolvedContact) {
-              setWhatsappContacts((prev) =>
-                prev.map((c) => (c.id === resolvedContact.id ? { ...c, sent: true } : c))
-              );
-            }
-            if (action.autoClose !== false) {
-              setIsWhatsappModalOpen(false);
-              window.setTimeout(() => {
-                setLastLaunchedApp((prev) =>
-                  prev && prev.url === waUrl ? null : prev
-                );
-              }, 3500);
-            } else {
-              setIsWhatsappModalOpen(true);
-            }
-          } else {
-            setIsWhatsappModalOpen(true);
-          }
-        } else if (action.type === 'close_whatsapp') {
-          setIsWhatsappModalOpen(false);
-          if (lastLaunchedAppRef.current?.appLabel === 'WhatsApp') {
-            setLastLaunchedApp(null);
-          }
+          setIsWhatsappModalOpen(true);
         } else if (action.type === 'read_story') {
           handledOwnSpeech = true;
           if (activeAudioElRef.current) {
-            activeAudioElRef.current.pause();
+            activeAudioElRef.current.stop();
             activeAudioElRef.current = null;
+            isSpeakingTtsRef.current = false;
+            setIsSpeakingTts(false);
           }
           livePlayerRef.current?.interrupt();
           try {
@@ -1615,6 +1451,8 @@ export default function App() {
             });
             const storyJson = await storyRes.json();
             if (storyJson.storyText) {
+              setAssistantReply(storyJson.storyText);
+              appendChatMessage('assistant', storyJson.storyText);
               if (!isMutedRef.current && storyPlayerRef.current) {
                 void storyPlayerRef.current.startStory(
                   storyJson.storyText,
@@ -1624,13 +1462,19 @@ export default function App() {
               }
             }
           } catch {
-            // keep running
+            // keep initial reply
           }
         } else if (action.type === 'continue_story') {
           handledOwnSpeech = true;
           livePlayerRef.current?.interrupt();
           const resumed = await storyPlayerRef.current?.resume();
           if (!resumed) {
+            const noStoryMsg =
+              languageRef.current === 'de'
+                ? 'Es gibt kein pausiertes Märchen — ich erzähle ein neues.'
+                : 'Nie mam wstrzymanej bajki — opowiem nową od początku.';
+            setAssistantReply(noStoryMsg);
+            appendChatMessage('assistant', noStoryMsg);
             void executeActions([{ type: 'read_story' }]);
           }
         } else if (action.type === 'pause_story') {
@@ -1754,6 +1598,8 @@ export default function App() {
                   : languageRef.current === 'de'
                     ? `YouTube geöffnet: ${picked.title}`
                     : `Włączyłem YouTube. Wybrano utwór nr 1: ${picked.title}`;
+              setAssistantReply(msg);
+              appendChatMessage('assistant', msg);
               void speakWithMiekiszon(msg);
             } else {
               const targetApp = action.service === 'youtube_music' ? 'youtube_music' : 'youtube';
@@ -1815,6 +1661,8 @@ export default function App() {
               languageRef.current === 'de'
                 ? `Ich spiele Titel Nummer ${pickedIdx + 1}: ${picked.title}`
                 : `Odtwarzam utwór numer ${pickedIdx + 1}: ${picked.title}`;
+            setAssistantReply(msg);
+            appendChatMessage('assistant', msg);
             void speakWithMiekiszon(msg);
           }
         } else if (action.type === 'close_youtube') {
@@ -1825,64 +1673,44 @@ export default function App() {
           setYoutubeError(null);
         } else if (action.type === 'open_browser') {
           setIsBrowserOpen(true);
-          isBrowserOpenRef.current = true;
+          setActiveArticle(null);
+          setArticleError(null);
           if (action.openExternalChrome) {
             launchExternalApp(getAppLaunchInfo('chrome', action.query));
           }
           if (action.query) {
-            await performBrowserSearch(action.query, Boolean(action.codeOnly), true);
-          } else if (action.url && /^https?:\/\//i.test(action.url)) {
-            await performOpenBrowserArticle(
-              {
-                id: 'direct_url',
-                title: action.url,
-                kind: 'website',
-                categoryLabel: 'Web',
-                summary: '',
-                address: null,
-                phone: null,
-                websiteUrl: action.url,
-                mapsUrl: null,
-                directionsUrl: null,
-              },
-              false
-            );
+            const webRes = await performWebSearch(action.query, false);
+            if (webRes?.answerSummary) {
+              handledOwnSpeech = true;
+              setAssistantReply(webRes.answerSummary);
+              appendChatMessage('assistant', webRes.answerSummary);
+              void speakWithMiekiszon(webRes.answerSummary);
+            }
           }
         } else if (action.type === 'select_article') {
-          const items = browserDataRef.current?.results ?? [];
+          const items = webSearchDataRef.current?.results || [];
           if (items.length > 0) {
-            let picked: WebSearchResultItem | undefined;
-            if (action.titleQuery) {
-              const needle = action.titleQuery.toLowerCase();
-              picked = items.find((r) => r.title.toLowerCase().includes(needle));
-            }
-            if (!picked) {
-              const idx = Math.min(
-                Math.max(1, action.articleIndex || 1) - 1,
-                items.length - 1
-              );
-              picked = items[idx];
-            }
-            if (picked) {
-              await performOpenBrowserArticle(picked, Boolean(action.readAloud));
-            }
+            const requestedIdx = Math.max(1, action.articleIndex || 1);
+            const picked = items[Math.min(requestedIdx - 1, items.length - 1)];
+            handledOwnSpeech = Boolean(action.readAloud);
+            await openBrowserArticle(picked, Boolean(action.readAloud), (speechText) => {
+              setAssistantReply(speechText);
+              appendChatMessage('assistant', speechText);
+              void speakWithMiekiszon(speechText);
+            });
           }
         } else if (action.type === 'close_article') {
-          setBrowserArticle(null);
-          browserArticleRef.current = null;
+          setActiveArticle(null);
+          setArticleError(null);
         } else if (action.type === 'close_browser') {
           setIsBrowserOpen(false);
-          isBrowserOpenRef.current = false;
-          setBrowserArticle(null);
-          browserArticleRef.current = null;
-          setIsBrowserLoading(false);
-          if (
-            lastLaunchedAppRef.current?.appLabel === 'Google Chrome' ||
-            lastLaunchedAppRef.current?.appLabel === 'Przeglądarka'
-          ) {
-            setLastLaunchedApp(null);
-            lastLaunchedAppRef.current = null;
-          }
+          setActiveArticle(null);
+          setIsArticleLoading(false);
+          setArticleError(null);
+          setLastLaunchedApp(null);
+          setWebSearchData(null);
+          webSearchDataRef.current = null;
+          setWebSearchError(null);
         } else if (action.type === 'open_calculator') {
           setIsCalculatorOpen(true);
           if (action.expression) {
@@ -1894,6 +1722,8 @@ export default function App() {
                 languageRef.current === 'de'
                   ? `Ergebnis von ${action.expression} ist ${resStr}.`
                   : `Wynik działania ${action.expression} to ${resStr}.`;
+              setAssistantReply(calcMsg);
+              appendChatMessage('assistant', calcMsg);
               void speakWithMiekiszon(calcMsg);
             }
           }
@@ -1924,74 +1754,19 @@ export default function App() {
         } else if (action.type === 'close_notepad') {
           setIsNotepadOpen(false);
         } else if (action.type === 'open_app') {
-          if (action.app === 'calculator') {
-            setIsCalculatorOpen(true);
-          } else if (action.app === 'notepad') {
-            setIsNotepadOpen(true);
-          } else if (action.app === 'whatsapp' && !action.contactName && !action.query) {
-            setIsWhatsappModalOpen(true);
-          } else {
-            const contact = findContactByName(action.contactName);
-            const launch = getAppLaunchInfo(
-              action.app,
-              action.query || contact?.name,
-              contact?.phone
-            );
-            launchExternalApp(launch);
-          }
-        } else if (action.type === 'close_app') {
-          const targetApp = action.app || 'all';
-          if (targetApp === 'all' || targetApp === 'whatsapp') {
-            setIsWhatsappModalOpen(false);
-          }
-          if (targetApp === 'all' || targetApp === 'phone') {
-            setDialTarget(null);
-          }
-          if (targetApp === 'all' || targetApp === 'booking') {
-            setAutoBookingTarget(null);
-          }
-          if (targetApp === 'all' || targetApp === 'calculator') {
-            setIsCalculatorOpen(false);
-          }
-          if (targetApp === 'all' || targetApp === 'notepad') {
-            setIsNotepadOpen(false);
-          }
-          if (targetApp === 'all' || targetApp === 'browser' || targetApp === 'chrome') {
-            setIsBrowserOpen(false);
-            isBrowserOpenRef.current = false;
-            setBrowserArticle(null);
-            browserArticleRef.current = null;
-            setIsBrowserLoading(false);
-          }
-          if (targetApp === 'all' || targetApp === 'youtube' || targetApp === 'youtube_music') {
-            setActiveYoutubeVideo(null);
-            activeYoutubeVideoRef.current = null;
-            setYoutubeResults([]);
-            youtubeResultsRef.current = [];
-            setYoutubeError(null);
-          }
-          if (targetApp === 'all') {
-            setDetachedWindow(null);
-            setLastLaunchedApp(null);
-          } else {
-            const labelByApp: Partial<Record<PhoneAppTarget, string>> = {
-              whatsapp: 'WhatsApp',
-              chrome: 'Google Chrome',
-              browser: 'Google Chrome',
-              youtube: 'YouTube',
-              youtube_music: 'YouTube Music',
-              maps: 'Mapy Google',
-              spotify: 'Spotify',
-              booking: 'Booking.com',
-              calendar: 'Kalendarz',
-              clock: 'Zegar Android',
-              phone: 'Telefon',
-            };
-            const targetLabel = labelByApp[targetApp];
-            if (!targetLabel || lastLaunchedAppRef.current?.appLabel === targetLabel) {
-              setLastLaunchedApp(null);
+          if (action.app === 'browser' || action.app === 'chrome') {
+            setIsBrowserOpen(true);
+            if (action.query) {
+              void performWebSearch(action.query, false);
             }
           }
+          const contact = findContactByName(action.contactName);
+          const launch = getAppLaunchInfo(
+            action.app,
+            action.query || contact?.name,
+            contact?.phone
+          );
+          launchExternalApp(launch);
         }
       }
       return handledOwnSpeech;
@@ -2003,18 +1778,104 @@ export default function App() {
       performStaysSearch,
       performAutoBookStay,
       performTransitSearch,
-      performBrowserSearch,
-      performOpenBrowserArticle,
-      performGoBack,
+      performWebSearch,
+      openBrowserArticle,
       triggerAndroidDial,
       speakWithMiekiszon,
       launchExternalApp,
       findContactByName,
+      appendChatMessage,
       whatsappMessage,
       checkIn,
       checkOut,
       guests,
     ]
+  );
+
+  const handleSubmitTextCommand = useCallback(
+    async (text: string, options?: { forceTts?: boolean }) => {
+      const cleanText = text.trim();
+      if (!cleanText) return;
+      // Unlock mobile AudioContext / <audio> synchronously inside the submit gesture
+      unlockMobileAudio();
+      setVoiceError(null);
+      setUserTranscript(cleanText);
+      setIsCommandLoading(true);
+      try {
+        const currentResults =
+          activeTabRef.current === 'food'
+            ? foodDataRef.current?.results ?? []
+            : activeTabRef.current === 'stays'
+              ? staysDataRef.current?.results ?? []
+              : [];
+
+        const res = await fetch('/api/assistant/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            transcript: cleanText,
+            currentTab: activeTabRef.current,
+            currentLocation: locationRef.current,
+            visibleItems: currentResults.slice(0, 6).map((item) => ({
+              name: item.name,
+              phone: item.phone,
+            })),
+            contacts: contactsRef.current.map((c) => ({
+              name: c.name,
+              phone: c.phone,
+              role: c.role,
+            })),
+            voiceGender: voiceGenderRef.current,
+            language: languageRef.current,
+          }),
+        });
+
+        const data = await parseApiJson<CommandResponse & { error?: string }>(
+          res,
+          languageRef.current === 'de'
+            ? 'Befehl konnte nicht ausgeführt werden'
+            : 'Nie udało się wykonać polecenia'
+        );
+
+        const replyText = typeof data.replyText === 'string' ? data.replyText.trim() : '';
+        const actions = Array.isArray(data.actions) ? data.actions : [];
+
+        if (!replyText && actions.length === 0) {
+          throw new Error(
+            languageRef.current === 'de'
+              ? 'Der Server hat eine leere Antwort zurückgegeben. Bitte versuche es erneut.'
+              : 'Serwer zwrócił pustą odpowiedź. Spróbuj ponownie.'
+          );
+        }
+
+        const effectiveReply =
+          replyText ||
+          (languageRef.current === 'de' ? 'Befehl wird ausgeführt.' : 'Wykonuję polecenie.');
+
+        setAssistantReply(effectiveReply);
+        appendChatMessage('assistant', effectiveReply);
+
+        const handledOwnSpeech = await executeActions(actions);
+        if (!handledOwnSpeech && effectiveReply) {
+          await speakWithMiekiszon(
+            effectiveReply,
+            languageRef.current,
+            Boolean(options?.forceTts)
+          );
+        }
+      } catch (err: any) {
+        const errMsg =
+          err?.message ||
+          (languageRef.current === 'de'
+            ? 'Fehler bei der Verarbeitung des Befehls.'
+            : 'Wystąpił błąd podczas przetwarzania polecenia.');
+        setVoiceError(errMsg);
+        setAssistantReply(errMsg);
+      } finally {
+        setIsCommandLoading(false);
+      }
+    },
+    [appendChatMessage, executeActions, speakWithMiekiszon]
   );
 
   // ---------------------------------------------------------------------------
@@ -2098,20 +1959,121 @@ export default function App() {
   }, [videoMode, activeTab]);
 
   // ---------------------------------------------------------------------------
-  // Gemini Live API Real-Time Voice Session (Persistent until user turns off)
+  // Gemini Live API Real-Time Voice Session + HTTP Voice Fallback (Cloudflare/Vercel safe)
   // ---------------------------------------------------------------------------
+  const resetVadBuffer = useCallback(() => {
+    vadSpeakingRef.current = false;
+    vadSpeechChunksRef.current = [];
+    vadPreRollRef.current = [];
+    vadSpeechStartMsRef.current = 0;
+    vadLastLoudMsRef.current = 0;
+    setHasBufferedSpeech(false);
+  }, []);
+
+  const clearVoiceTimers = useCallback(() => {
+    if (liveReconnectTimerRef.current !== null) {
+      window.clearTimeout(liveReconnectTimerRef.current);
+      liveReconnectTimerRef.current = null;
+    }
+    if (livePingTimerRef.current !== null) {
+      window.clearInterval(livePingTimerRef.current);
+      livePingTimerRef.current = null;
+    }
+    if (wsStartupTimerRef.current !== null) {
+      window.clearTimeout(wsStartupTimerRef.current);
+      wsStartupTimerRef.current = null;
+    }
+    if (liveResponseWatchdogRef.current !== null) {
+      window.clearTimeout(liveResponseWatchdogRef.current);
+      liveResponseWatchdogRef.current = null;
+    }
+  }, []);
+
+  const processHttpVoiceUtterance = useCallback(
+    async (chunks: Float32Array[], manualTrigger = false) => {
+      if (isProcessingHttpVoiceRef.current) return;
+      const totalSamples = chunks.reduce((acc, c) => acc + c.length, 0);
+      if (totalSamples < 4000) {
+        if (manualTrigger) {
+          setVoiceError(
+            languageRef.current === 'de'
+              ? 'Die Aufnahme war zu kurz. Sprich kurz ins Mikrofon und versuche es erneut.'
+              : 'Nagranie było zbyt krótkie. Powiedz polecenie do mikrofonu i spróbuj ponownie.'
+          );
+        }
+        return;
+      }
+
+      isProcessingHttpVoiceRef.current = true;
+      setIsVoiceProcessing(true);
+      setVoiceError(null);
+
+      try {
+        const audioBase64 = encodePcm16ChunksToWavBase64(chunks, 16000);
+        const transcribeRes = await fetch('/api/assistant/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            audioBase64,
+            mimeType: 'audio/wav',
+            language: languageRef.current,
+          }),
+        });
+
+        const transcribeData = await parseApiJson<{
+          text?: string;
+          empty?: boolean;
+          error?: string;
+        }>(
+          transcribeRes,
+          languageRef.current === 'de'
+            ? 'Spracherkennung fehlgeschlagen'
+            : 'Błąd rozpoznawania mowy'
+        );
+
+        const spokenText = (transcribeData.text || '').trim();
+        if (!spokenText) {
+          if (manualTrigger || totalSamples >= 16000) {
+            setVoiceError(
+              languageRef.current === 'de'
+                ? 'Keine klare Sprache erkannt. Bitte sprich etwas deutlicher ins Mikrofon.'
+                : 'Nie rozpoznano wyraźnej mowy. Powiedz polecenie wyraźniej bliżej mikrofonu.'
+            );
+          }
+          return;
+        }
+
+        setUserTranscript(spokenText);
+        await handleSubmitTextCommand(spokenText, { forceTts: true });
+      } catch (err: any) {
+        const errMsg =
+          err?.message ||
+          (languageRef.current === 'de'
+            ? 'Fehler bei der Verarbeitung der Sprachnachricht.'
+            : 'Błąd przetwarzania wypowiedzi głosowej.');
+        setVoiceError(errMsg);
+        setAssistantReply(errMsg);
+      } finally {
+        isProcessingHttpVoiceRef.current = false;
+        setIsVoiceProcessing(false);
+        resetVadBuffer();
+      }
+    },
+    [handleSubmitTextCommand, resetVadBuffer]
+  );
+
+  const processHttpVoiceUtteranceRef = useRef(processHttpVoiceUtterance);
+  processHttpVoiceUtteranceRef.current = processHttpVoiceUtterance;
+
   const stopLiveSession = useCallback(
     (preserveVideo = false, keepAliveForReconnect = false) => {
-      if (liveReconnectTimerRef.current !== null) {
-        window.clearTimeout(liveReconnectTimerRef.current);
-        liveReconnectTimerRef.current = null;
-      }
-      if (livePingTimerRef.current !== null) {
-        window.clearInterval(livePingTimerRef.current);
-        livePingTimerRef.current = null;
-      }
+      clearVoiceTimers();
       if (!keepAliveForReconnect) {
         shouldStayLiveRef.current = false;
+        voiceTransportModeRef.current = 'live';
+        resetVadBuffer();
+        liveLastUtteranceRef.current = [];
+        setIsVoiceProcessing(false);
       }
 
       if (liveInputBufRef.current.trim()) {
@@ -2137,40 +2099,12 @@ export default function App() {
         }
       }
 
-      if (speechRecRef.current) {
-        const oldRec = speechRecRef.current;
-        speechRecRef.current = null;
-        oldRec.onresult = null;
-        oldRec.onerror = null;
-        oldRec.onend = null;
-        try {
-          oldRec.stop();
-        } catch {
-          // ignore
-        }
-      }
-      if (recorderTimerRef.current !== null) {
-        window.clearTimeout(recorderTimerRef.current);
-        recorderTimerRef.current = null;
-      }
-      if (mediaRecorderRef.current) {
-        const oldMr = mediaRecorderRef.current;
-        mediaRecorderRef.current = null;
-        try {
-          if (oldMr.state !== 'inactive') oldMr.stop();
-        } catch {
-          // ignore
-        }
-      }
       if (!keepAliveForReconnect) {
-        voiceTransportRef.current = 'none';
-        isProcessingHttpVoiceRef.current = false;
-        if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-          try {
-            window.speechSynthesis.cancel();
-          } catch {
-            // ignore
-          }
+        if (activeAudioElRef.current) {
+          activeAudioElRef.current.stop();
+          activeAudioElRef.current = null;
+          isSpeakingTtsRef.current = false;
+          setIsSpeakingTts(false);
         }
         if (liveProcessorRef.current) {
           liveProcessorRef.current.disconnect();
@@ -2202,22 +2136,27 @@ export default function App() {
         liveStatusRef.current = 'idle';
       }
     },
-    [appendChatMessage, stopVideoShare]
+    [appendChatMessage, clearVoiceTimers, resetVadBuffer, stopVideoShare]
   );
 
   stopLiveSessionRef.current = () => stopLiveSession(false, false);
 
   const handleToggleMute = useCallback(() => {
+    unlockMobileAudio();
     setIsMuted((prev) => {
       const next = !prev;
       isMutedRef.current = next;
       if (next && activeAudioElRef.current) {
-        activeAudioElRef.current.pause();
+        activeAudioElRef.current.stop();
         activeAudioElRef.current = null;
+        isSpeakingTtsRef.current = false;
         setIsSpeakingTts(false);
       }
       if (livePlayerRef.current) {
         livePlayerRef.current.setMuted(next);
+        if (!next) {
+          livePlayerRef.current.unlock();
+        }
       }
       if (liveMicStreamRef.current) {
         liveMicStreamRef.current.getAudioTracks().forEach((t) => {
@@ -2228,32 +2167,100 @@ export default function App() {
     });
   }, []);
 
+  const handleFinishUtterance = useCallback(() => {
+    unlockMobileAudio();
+    livePlayerRef.current?.unlock();
+    const captured = [...vadSpeechChunksRef.current];
+    resetVadBuffer();
+
+    if (voiceTransportModeRef.current === 'http') {
+      void processHttpVoiceUtterance(captured, true);
+      return;
+    }
+
+    const activeWs = liveWsRef.current;
+    if (activeWs && activeWs.readyState === WebSocket.OPEN && wsReadyReceivedRef.current) {
+      liveLastUtteranceRef.current = captured;
+      liveTurnGotResponseRef.current = false;
+      setIsVoiceProcessing(true);
+      try {
+        activeWs.send(JSON.stringify({ type: 'audio_end' }));
+      } catch {
+        // ignore
+      }
+      if (liveResponseWatchdogRef.current !== null) {
+        window.clearTimeout(liveResponseWatchdogRef.current);
+      }
+      liveResponseWatchdogRef.current = window.setTimeout(() => {
+        liveResponseWatchdogRef.current = null;
+        if (
+          shouldStayLiveRef.current &&
+          voiceTransportModeRef.current === 'live' &&
+          !liveTurnGotResponseRef.current
+        ) {
+          const snapshot = liveLastUtteranceRef.current;
+          liveLastUtteranceRef.current = [];
+          if (snapshot.length > 0) {
+            void processHttpVoiceUtterance(snapshot, true);
+          } else {
+            setIsVoiceProcessing(false);
+            setVoiceError(
+              languageRef.current === 'de'
+                ? 'Der Live-Assistent hat nicht rechtzeitig geantwortet. Bitte sprich erneut.'
+                : 'Asystent nie zwrócił odpowiedzi po zakończeniu wypowiedzi. Spróbuj ponownie.'
+            );
+          }
+        }
+      }, 9500);
+    } else if (captured.length > 0) {
+      void processHttpVoiceUtterance(captured, true);
+    }
+  }, [processHttpVoiceUtterance, resetVadBuffer]);
+
+  const handleReplayReply = useCallback(() => {
+    unlockMobileAudio();
+    livePlayerRef.current?.unlock();
+    setVoiceError(null);
+    if (assistantReply.trim()) {
+      void speakWithMiekiszon(assistantReply, languageRef.current, true);
+    }
+  }, [assistantReply, speakWithMiekiszon]);
+
   const startLiveSessionWithOptions = useCallback(
     async (gender: VoiceGender, lang: AssistantLanguage, isAutoReconnect = false) => {
       shouldStayLiveRef.current = true;
-      if (liveReconnectTimerRef.current !== null) {
-        window.clearTimeout(liveReconnectTimerRef.current);
-        liveReconnectTimerRef.current = null;
-      }
+      clearVoiceTimers();
       if (activeAudioElRef.current) {
-        activeAudioElRef.current.pause();
+        activeAudioElRef.current.stop();
         activeAudioElRef.current = null;
+        isSpeakingTtsRef.current = false;
         setIsSpeakingTts(false);
       }
 
       if (!isAutoReconnect) {
         wsStartupFailuresRef.current = 0;
-        setLiveErrorMessage(null);
+        voiceTransportModeRef.current = 'live';
+        setVoiceError(null);
+        setUserTranscript('');
+        setIsVoiceProcessing(false);
+        resetVadBuffer();
         setLiveStatus('connecting');
         liveStatusRef.current = 'connecting';
       }
 
-      // IMPORTANT for iOS Safari / Android Chrome: initialize & resume Web Audio
-      // contexts synchronously BEFORE any `await` so the user gesture token is preserved.
+      // IMPORTANT for iOS Safari / Android Chrome: unlock both Web Audio AudioContext
+      // and <audio> synchronously BEFORE any `await` so the user gesture token is preserved.
+      unlockMobileAudio();
       try {
         let player = livePlayerRef.current;
         if (!player) {
-          player = new LivePcmPlayer();
+          player = new LivePcmPlayer((err) => {
+            setVoiceError(
+              lang === 'de'
+                ? `Audiowiedergabe blockiert: ${err.message}`
+                : `Odtwarzanie dźwięku zablokowane: ${err.message}`
+            );
+          });
           livePlayerRef.current = player;
         }
         player.setMuted(isMutedRef.current);
@@ -2263,7 +2270,7 @@ export default function App() {
           liveInputCtxRef.current = createCompatAudioContext();
         }
         if (liveInputCtxRef.current.state === 'suspended') {
-          void liveInputCtxRef.current.resume();
+          void liveInputCtxRef.current.resume().catch(() => {});
         }
       } catch (audioInitErr) {
         console.warn('Pre-await AudioContext unlock failed:', audioInitErr);
@@ -2279,11 +2286,12 @@ export default function App() {
           stopLiveSession(false, false);
           setLiveStatus('error');
           liveStatusRef.current = 'error';
-          setLiveErrorMessage(
+          const noMicMsg =
             lang === 'de'
               ? 'Mikrofonzugriff wird von diesem Browser/Kontext blockiert (bitte direkt über HTTPS in Chrome oder Safari öffnen).'
-              : 'Przeglądarka blokuje mikrofon (otwórz aplikację bezpośrednio po HTTPS w Google Chrome lub Safari i zezwól na mikrofon).'
-          );
+              : 'Przeglądarka blokuje mikrofon (otwórz aplikację bezpośrednio po HTTPS w Google Chrome lub Safari i zezwól na mikrofon).';
+          setVoiceError(noMicMsg);
+          setAssistantReply(noMicMsg);
           return;
         }
 
@@ -2327,9 +2335,17 @@ export default function App() {
           t.enabled = !isMutedRef.current;
         });
 
+        // Re-unlock playback AudioContext after getUserMedia (iOS Safari may suspend output on mic route switch)
+        unlockMobileAudio();
         let player = livePlayerRef.current;
         if (!player) {
-          player = new LivePcmPlayer();
+          player = new LivePcmPlayer((err) => {
+            setVoiceError(
+              lang === 'de'
+                ? `Audiowiedergabe blockiert: ${err.message}`
+                : `Odtwarzanie dźwięku zablokowane: ${err.message}`
+            );
+          });
           livePlayerRef.current = player;
         }
         player.setMuted(isMutedRef.current);
@@ -2343,6 +2359,41 @@ export default function App() {
         if (inputCtx.state === 'suspended') {
           await inputCtx.resume();
         }
+
+        const activateHttpVoiceFallback = (reasonNote?: string) => {
+          clearVoiceTimers();
+          if (liveWsRef.current) {
+            const oldWs = liveWsRef.current;
+            liveWsRef.current = null;
+            oldWs.onopen = null;
+            oldWs.onmessage = null;
+            oldWs.onerror = null;
+            oldWs.onclose = null;
+            try {
+              oldWs.close(1000, 'fallback_http');
+            } catch {
+              // ignore
+            }
+          }
+          voiceTransportModeRef.current = 'http';
+          wsReadyReceivedRef.current = false;
+          setIsLiveActive(true);
+          isLiveActiveRef.current = true;
+          setLiveStatus('active');
+          liveStatusRef.current = 'active';
+          setVoiceError(null);
+          const profile = VOICE_PROFILES.find((v) => v.id === gender) || VOICE_PROFILES[0];
+          const readyMsg =
+            lang === 'de'
+              ? `Sprachassistent aktiv (Deutsch, ${profile.labelDe}). Sprich deinen Befehl und mache eine kurze Pause — ich antworte per Sprache und Text.`
+              : `Asystent głosowy aktywny (Polski, głos ${profile.labelPl}). Powiedz polecenie i zrób krótką pauzę — odpowiem głosem i tekstem.`;
+          if (!isAutoReconnect) {
+            setAssistantReply(readyMsg);
+          }
+          if (reasonNote) {
+            console.info('[VoiceFallback] Switched to HTTP voice turn mode:', reasonNote);
+          }
+        };
 
         if (!liveProcessorRef.current || !hasHealthyMic) {
           if (liveProcessorRef.current) {
@@ -2366,288 +2417,118 @@ export default function App() {
           processor.onaudioprocess = (e) => {
             const rawChannel = e.inputBuffer.getChannelData(0);
             const rms = computeRmsLevel(rawChannel);
-            if (rms > 0.03) {
-              chunkHadVoiceRef.current = true;
-            }
             const nowMs = Date.now();
             if (nowMs - lastMicUiUpdateRef.current >= 140) {
               lastMicUiUpdateRef.current = nowMs;
               setMicLevel(rms);
             }
+
+            if (isMutedRef.current) return;
+
+            const ctxRate = liveInputCtxRef.current?.sampleRate || 48000;
+            const resampled = resampleFloat32(rawChannel, ctxRate, 16000);
+            const resampledCopy = new Float32Array(resampled);
+
+            // 1. Live WebSocket real-time streaming path
             const activeWs = liveWsRef.current;
-            if (
+            const isLiveWsOpen =
+              voiceTransportModeRef.current === 'live' &&
               activeWs &&
               activeWs.readyState === WebSocket.OPEN &&
-              activeWs.bufferedAmount < 65536 &&
-              !isMutedRef.current
-            ) {
-              const ctxRate = liveInputCtxRef.current?.sampleRate || 48000;
-              const resampled = resampleFloat32(rawChannel, ctxRate, 16000);
-              const base64 = float32ToPcm16Base64(resampled);
+              wsReadyReceivedRef.current;
+
+            if (isLiveWsOpen && activeWs.bufferedAmount < 65536) {
+              const base64 = float32ToPcm16Base64(resampledCopy);
               activeWs.send(JSON.stringify({ audio: base64 }));
+            }
+
+            // 2. Client-side VAD for end-of-speech signaling (Live WS) & utterance capture (HTTP fallback)
+            const assistantIsAudioBusy =
+              isSpeakingTtsRef.current ||
+              isProcessingHttpVoiceRef.current ||
+              Boolean(livePlayerRef.current?.isPlaying());
+
+            if (assistantIsAudioBusy) {
+              return;
+            }
+
+            // Maintain ~350ms pre-roll buffer so first syllable is never clipped
+            vadPreRollRef.current.push(resampledCopy);
+            if (vadPreRollRef.current.length > 5) {
+              vadPreRollRef.current.shift();
+            }
+
+            const speechThreshold = voiceTransportModeRef.current === 'http' ? 0.055 : 0.065;
+            const silenceTimeoutMs = voiceTransportModeRef.current === 'http' ? 1250 : 1200;
+
+            if (rms >= speechThreshold) {
+              if (!vadSpeakingRef.current) {
+                vadSpeakingRef.current = true;
+                vadSpeechStartMsRef.current = nowMs;
+                vadSpeechChunksRef.current = [...vadPreRollRef.current];
+                setHasBufferedSpeech(true);
+              } else {
+                vadSpeechChunksRef.current.push(resampledCopy);
+              }
+              vadLastLoudMsRef.current = nowMs;
+            } else if (vadSpeakingRef.current) {
+              vadSpeechChunksRef.current.push(resampledCopy);
+              const speechDurationMs = nowMs - vadSpeechStartMsRef.current;
+              const silenceDurationMs = nowMs - vadLastLoudMsRef.current;
+
+              if (silenceDurationMs >= silenceTimeoutMs || speechDurationMs >= 20000) {
+                const capturedChunks = vadSpeechChunksRef.current;
+                vadSpeakingRef.current = false;
+                vadSpeechChunksRef.current = [];
+                vadSpeechStartMsRef.current = 0;
+                vadLastLoudMsRef.current = 0;
+                setHasBufferedSpeech(false);
+
+                if (speechDurationMs >= 350) {
+                  if (voiceTransportModeRef.current === 'http') {
+                    void processHttpVoiceUtteranceRef.current(capturedChunks, false);
+                  } else if (isLiveWsOpen) {
+                    // Explicitly signal end-of-speech to Gemini Live & arm response watchdog
+                    liveLastUtteranceRef.current = capturedChunks;
+                    liveTurnGotResponseRef.current = false;
+                    setIsVoiceProcessing(true);
+                    try {
+                      activeWs.send(JSON.stringify({ type: 'audio_end' }));
+                    } catch {
+                      // ignore
+                    }
+                    if (liveResponseWatchdogRef.current !== null) {
+                      window.clearTimeout(liveResponseWatchdogRef.current);
+                    }
+                    liveResponseWatchdogRef.current = window.setTimeout(() => {
+                      liveResponseWatchdogRef.current = null;
+                      if (
+                        shouldStayLiveRef.current &&
+                        voiceTransportModeRef.current === 'live' &&
+                        !liveTurnGotResponseRef.current
+                      ) {
+                        const snapshot = liveLastUtteranceRef.current;
+                        liveLastUtteranceRef.current = [];
+                        if (snapshot.length > 0) {
+                          console.warn(
+                            '[LiveWatchdog] No Live response after speech end; recovering via HTTP voice turn.'
+                          );
+                          void processHttpVoiceUtteranceRef.current(snapshot, false);
+                        } else {
+                          setIsVoiceProcessing(false);
+                        }
+                      }
+                    }, 9500);
+                  }
+                }
+              }
             }
           };
         }
 
-        const runHttpVoiceCommand = async (spokenText: string) => {
-          const clean = spokenText.trim();
-          if (!clean || !shouldStayLiveRef.current) return;
-          isProcessingHttpVoiceRef.current = true;
-          try {
-            const visibleItems = [
-              ...(foodDataRef.current?.results ?? []).slice(0, 5),
-              ...(staysDataRef.current?.results ?? []).slice(0, 5),
-            ].map((item) => ({ name: item.name, phone: item.phone }));
-            const res = await fetch('/api/assistant/command', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                transcript: clean,
-                currentTab: activeTabRef.current,
-                currentLocation: locationRef.current,
-                visibleItems,
-                contacts: contactsRef.current.slice(0, 12).map((c) => ({
-                  name: c.name,
-                  phone: c.phone,
-                })),
-                voiceGender: voiceGenderRef.current,
-                language: languageRef.current,
-              }),
-            });
-            if (!res.ok) return;
-            const json = await res.json();
-            const actions = Array.isArray(json.actions) ? json.actions : [];
-            const handledOwnSpeech = await executeActions(actions);
-            if (!handledOwnSpeech && json.replyText && shouldStayLiveRef.current) {
-              await speakWithMiekiszon(json.replyText, languageRef.current, true);
-            }
-          } catch {
-            // ignore transient command failure and keep listening
-          } finally {
-            isProcessingHttpVoiceRef.current = false;
-          }
-        };
-
-        const startBrowserVoiceFallbackSession = async (targetLang: AssistantLanguage) => {
-          if (!shouldStayLiveRef.current) return;
-          if (liveWsRef.current) {
-            const staleWs = liveWsRef.current;
-            liveWsRef.current = null;
-            staleWs.onopen = null;
-            staleWs.onmessage = null;
-            staleWs.onerror = null;
-            staleWs.onclose = null;
-            try {
-              staleWs.close(1000, 'fallback_http');
-            } catch {
-              // ignore
-            }
-          }
-
-          const SpeechRecognitionCtor =
-            (window as unknown as { SpeechRecognition?: any; webkitSpeechRecognition?: any })
-              .SpeechRecognition ||
-            (window as unknown as { webkitSpeechRecognition?: any }).webkitSpeechRecognition;
-
-          if (SpeechRecognitionCtor) {
-            voiceTransportRef.current = 'http_speech';
-            setLiveErrorMessage(null);
-            setIsLiveActive(true);
-            isLiveActiveRef.current = true;
-            setLiveStatus('active');
-            liveStatusRef.current = 'active';
-
-            const launchRec = () => {
-              if (!shouldStayLiveRef.current || voiceTransportRef.current !== 'http_speech') return;
-              const rec = new SpeechRecognitionCtor();
-              rec.lang = targetLang === 'de' ? 'de-DE' : 'pl-PL';
-              rec.continuous = true;
-              rec.interimResults = false;
-              rec.maxAlternatives = 1;
-              speechRecRef.current = rec;
-
-              rec.onresult = (evt: any) => {
-                if (isMutedRef.current || isProcessingHttpVoiceRef.current) return;
-                let finalText = '';
-                for (let i = evt.resultIndex; i < evt.results.length; i++) {
-                  if (evt.results[i].isFinal) {
-                    finalText += ` ${evt.results[i][0]?.transcript || ''}`;
-                  }
-                }
-                const cleaned = finalText.trim();
-                if (!cleaned) return;
-                try {
-                  rec.stop();
-                } catch {
-                  // ignore
-                }
-                void runHttpVoiceCommand(cleaned).finally(() => {
-                  if (shouldStayLiveRef.current && voiceTransportRef.current === 'http_speech') {
-                    window.setTimeout(launchRec, 250);
-                  }
-                });
-              };
-
-              rec.onerror = (evt: any) => {
-                if (evt?.error === 'not-allowed' || evt?.error === 'service-not-allowed') {
-                  shouldStayLiveRef.current = false;
-                  stopLiveSession(false, false);
-                  setLiveStatus('error');
-                  liveStatusRef.current = 'error';
-                  setLiveErrorMessage(
-                    targetLang === 'de'
-                      ? 'Mikrofonzugriff wurde blockiert. Bitte Berechtigung im Browser erlauben.'
-                      : 'Brak zgody na mikrofon — zezwól na mikrofon w ustawieniach przeglądarki.'
-                  );
-                }
-              };
-
-              rec.onend = () => {
-                if (
-                  shouldStayLiveRef.current &&
-                  voiceTransportRef.current === 'http_speech' &&
-                  !isProcessingHttpVoiceRef.current
-                ) {
-                  window.setTimeout(launchRec, 300);
-                }
-              };
-
-              try {
-                rec.start();
-              } catch {
-                // ignore duplicate start
-              }
-            };
-
-            launchRec();
-            return;
-          }
-
-          // MediaRecorder fallback for browsers without Web Speech API (e.g. Firefox)
-          if (typeof MediaRecorder !== 'undefined' && stream) {
-            voiceTransportRef.current = 'http_recorder';
-            setLiveErrorMessage(null);
-            setIsLiveActive(true);
-            isLiveActiveRef.current = true;
-            setLiveStatus('active');
-            liveStatusRef.current = 'active';
-
-            const recordNextSegment = () => {
-              if (!shouldStayLiveRef.current || voiceTransportRef.current !== 'http_recorder') {
-                return;
-              }
-              if (isMutedRef.current || isProcessingHttpVoiceRef.current) {
-                recorderTimerRef.current = window.setTimeout(recordNextSegment, 500);
-                return;
-              }
-              const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-                ? 'audio/webm;codecs=opus'
-                : MediaRecorder.isTypeSupported('audio/webm')
-                  ? 'audio/webm'
-                  : '';
-              const mr = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-              mediaRecorderRef.current = mr;
-              const chunks: BlobPart[] = [];
-              chunkHadVoiceRef.current = false;
-
-              mr.ondataavailable = (ev) => {
-                if (ev.data && ev.data.size > 0) chunks.push(ev.data);
-              };
-
-              mr.onstop = async () => {
-                const hadVoice = chunkHadVoiceRef.current;
-                if (
-                  hadVoice &&
-                  chunks.length > 0 &&
-                  shouldStayLiveRef.current &&
-                  !isMutedRef.current
-                ) {
-                  try {
-                    const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
-                    const base64Audio = await new Promise<string>((resolve) => {
-                      const reader = new FileReader();
-                      reader.onloadend = () => {
-                        const result = String(reader.result || '');
-                        resolve(result.includes(',') ? result.split(',')[1] : '');
-                      };
-                      reader.readAsDataURL(blob);
-                    });
-                    if (base64Audio) {
-                      const trRes = await fetch('/api/assistant/transcribe', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                          audioBase64: base64Audio,
-                          mimeType: mr.mimeType || 'audio/webm',
-                          language: targetLang,
-                        }),
-                      });
-                      if (trRes.ok) {
-                        const trJson = await trRes.json();
-                        if (trJson?.text?.trim()) {
-                          await runHttpVoiceCommand(trJson.text.trim());
-                        }
-                      }
-                    }
-                  } catch {
-                    // ignore transient transcription error
-                  }
-                }
-                if (shouldStayLiveRef.current && voiceTransportRef.current === 'http_recorder') {
-                  recordNextSegment();
-                }
-              };
-
-              try {
-                mr.start();
-                recorderTimerRef.current = window.setTimeout(() => {
-                  try {
-                    if (mr.state === 'recording') mr.stop();
-                  } catch {
-                    // ignore
-                  }
-                }, 4000);
-              } catch {
-                // ignore
-              }
-            };
-
-            recordNextSegment();
-            return;
-          }
-
-          shouldStayLiveRef.current = false;
-          stopLiveSession(false, false);
-          setLiveStatus('error');
-          liveStatusRef.current = 'error';
-          setLiveErrorMessage(
-            targetLang === 'de'
-              ? 'Spracherkennung wird von diesem Browser nicht unterstützt.'
-              : 'Ta przeglądarka nie obsługuje rozpoznawania mowy.'
-          );
-        };
-
-        // Detect serverless runtime (e.g. Vercel) where /api/live WebSocket upgrade is unavailable
-        if (liveWebsocketCapableRef.current === null) {
-          try {
-            const ctrl = new AbortController();
-            const tid = window.setTimeout(() => ctrl.abort(), 2500);
-            const healthRes = await fetch('/api/health', {
-              cache: 'no-store',
-              signal: ctrl.signal,
-            });
-            window.clearTimeout(tid);
-            if (healthRes.ok) {
-              const healthJson = await healthRes.json();
-              liveWebsocketCapableRef.current = healthJson?.liveWebsocket !== false;
-            }
-          } catch {
-            // proceed with WebSocket attempt + fallback
-          }
-        }
-
-        if (liveWebsocketCapableRef.current === false) {
-          await startBrowserVoiceFallbackSession(lang);
+        // If already switched to HTTP fallback mode, stay in HTTP mode cleanly
+        if (voiceTransportModeRef.current === 'http') {
+          activateHttpVoiceFallback();
           return;
         }
 
@@ -2666,7 +2547,6 @@ export default function App() {
           }
         }
 
-        voiceTransportRef.current = 'ws';
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         wsReadyReceivedRef.current = false;
         const ws = new WebSocket(
@@ -2674,16 +2554,43 @@ export default function App() {
         );
         liveWsRef.current = ws;
 
-        const scheduleAutoReconnect = (failureReason?: string) => {
+        // If /api/live WebSocket never completes setup (e.g. Vercel serverless or Cloudflare WS block),
+        // seamlessly switch to HTTP Voice Turn mode instead of hanging in silence!
+        wsStartupTimerRef.current = window.setTimeout(() => {
+          wsStartupTimerRef.current = null;
+          if (shouldStayLiveRef.current && !wsReadyReceivedRef.current) {
+            activateHttpVoiceFallback('WebSocket /api/live startup timeout');
+          }
+        }, 6000);
+
+        const scheduleAutoReconnect = (failureReason?: string, fatal = false) => {
+          if (wsStartupTimerRef.current !== null) {
+            window.clearTimeout(wsStartupTimerRef.current);
+            wsStartupTimerRef.current = null;
+          }
           if (!shouldStayLiveRef.current) {
             stopLiveSession(false, false);
             return;
           }
+          if (fatal) {
+            shouldStayLiveRef.current = false;
+            stopLiveSession(false, false);
+            setLiveStatus('error');
+            liveStatusRef.current = 'error';
+            const fatalMsg =
+              failureReason ||
+              (lang === 'de'
+                ? 'Fehler bei der Verbindung zum KI-Modell. Bitte API-Schlüssel und Konfiguration prüfen.'
+                : 'Błąd połączenia z modelem AI. Sprawdź klucz GEMINI_API_KEY i konfigurację serwera.');
+            setVoiceError(fatalMsg);
+            setAssistantReply(fatalMsg);
+            return;
+          }
           if (!wsReadyReceivedRef.current) {
             wsStartupFailuresRef.current += 1;
+            // On Cloudflare / Vercel where WS upgrade fails immediately, switch to HTTP Voice Fallback
             if (wsStartupFailuresRef.current >= 1) {
-              liveWebsocketCapableRef.current = false;
-              void startBrowserVoiceFallbackSession(languageRef.current);
+              activateHttpVoiceFallback(failureReason || 'WebSocket unavailable');
               return;
             }
           }
@@ -2717,33 +2624,64 @@ export default function App() {
               }
             }
             if (liveInputCtxRef.current?.state === 'suspended') {
-              void liveInputCtxRef.current.resume();
+              void liveInputCtxRef.current.resume().catch(() => {});
             }
             livePlayerRef.current?.resumeIfNeeded();
           }, 12000);
         };
 
         ws.onmessage = (event) => {
-          const msg = JSON.parse(event.data);
+          let msg: any;
+          try {
+            msg = JSON.parse(typeof event.data === 'string' ? event.data : String(event.data));
+          } catch {
+            return;
+          }
+
           if (msg.type === 'pong') {
             return;
           }
+
           if (msg.type === 'ready') {
+            if (wsStartupTimerRef.current !== null) {
+              window.clearTimeout(wsStartupTimerRef.current);
+              wsStartupTimerRef.current = null;
+            }
             wsReadyReceivedRef.current = true;
             wsStartupFailuresRef.current = 0;
             reconnectAttemptRef.current = 0;
-            setLiveErrorMessage(null);
+            voiceTransportModeRef.current = 'live';
             setIsLiveActive(true);
             isLiveActiveRef.current = true;
             setLiveStatus('active');
             liveStatusRef.current = 'active';
+            setVoiceError(null);
             liveInputBufRef.current = '';
             liveOutputBufRef.current = '';
+            if (!isAutoReconnect) {
+              const profile = VOICE_PROFILES.find((v) => v.id === gender) || VOICE_PROFILES[0];
+              const readyText =
+                lang === 'de'
+                  ? `Live-Verbindung aktiv (Deutsch, ${profile.labelDe} · ${
+                      profile.gender === 'male' ? 'männlich' : 'weiblich'
+                    }). Ich höre zu.`
+                  : `Połączono na żywo (Polski, głos ${profile.labelPl} · ${
+                      profile.gender === 'male' ? 'męski' : 'damski'
+                    }). Słucham Cię.`;
+              setAssistantReply(readyText);
+            }
           } else if (msg.type === 'audio' && msg.audio) {
-            livePlayerRef.current?.enqueuePcmBase64(msg.audio);
+            liveTurnGotResponseRef.current = true;
+            setIsVoiceProcessing(false);
+            if (liveResponseWatchdogRef.current !== null) {
+              window.clearTimeout(liveResponseWatchdogRef.current);
+              liveResponseWatchdogRef.current = null;
+            }
+            livePlayerRef.current?.enqueuePcmBase64(msg.audio, msg.sampleRate || 24000);
           } else if (msg.type === 'interrupted') {
             livePlayerRef.current?.interrupt();
             storyPlayerRef.current?.pause();
+            setIsVoiceProcessing(false);
           } else if (msg.type === 'input_transcript' && msg.text) {
             const st = storyPlayerRef.current?.getStatus();
             if (st === 'playing' || st === 'loading') {
@@ -2753,11 +2691,27 @@ export default function App() {
               }
             }
             liveInputBufRef.current = liveInputBufRef.current
-              ? `${liveInputBufRef.current} ${msg.text}`
-              : msg.text;
-          } else if (msg.type === 'output_transcript' && msg.text) {
+              ? `${liveInputBufRef.current} ${msg.text}`.replace(/\s+/g, ' ').trim()
+              : String(msg.text).trim();
+            setUserTranscript(liveInputBufRef.current);
+          } else if (
+            (msg.type === 'output_transcript' || msg.type === 'output_text') &&
+            msg.text
+          ) {
+            liveTurnGotResponseRef.current = true;
+            setIsVoiceProcessing(false);
+            if (liveResponseWatchdogRef.current !== null) {
+              window.clearTimeout(liveResponseWatchdogRef.current);
+              liveResponseWatchdogRef.current = null;
+            }
             liveOutputBufRef.current = `${liveOutputBufRef.current}${msg.text}`;
+            setAssistantReply(liveOutputBufRef.current);
           } else if (msg.type === 'turn_complete') {
+            setIsVoiceProcessing(false);
+            if (liveResponseWatchdogRef.current !== null) {
+              window.clearTimeout(liveResponseWatchdogRef.current);
+              liveResponseWatchdogRef.current = null;
+            }
             if (liveInputBufRef.current.trim()) {
               appendChatMessage('user', liveInputBufRef.current, lang);
               liveInputBufRef.current = '';
@@ -2766,14 +2720,17 @@ export default function App() {
               appendChatMessage('assistant', liveOutputBufRef.current, lang);
               liveOutputBufRef.current = '';
             }
+            liveLastUtteranceRef.current = [];
           } else if (msg.type === 'tool_action') {
+            liveTurnGotResponseRef.current = true;
+            setIsVoiceProcessing(false);
+            if (liveResponseWatchdogRef.current !== null) {
+              window.clearTimeout(liveResponseWatchdogRef.current);
+              liveResponseWatchdogRef.current = null;
+            }
             const { name, args } = msg;
             if (name === 'navigateToTab') {
               void executeActions([{ type: 'navigate', tab: args.tab, explicit: true }]);
-            } else if (name === 'goBackWindow') {
-              void executeActions([
-                { type: 'go_back', ...(args.steps ? { steps: Number(args.steps) } : {}) },
-              ]);
             } else if (name === 'closeOrReturnTab') {
               void executeActions([{ type: 'close_tab', targetTab: args.targetTab }]);
             } else if (name === 'setAssistantLanguage') {
@@ -2794,8 +2751,6 @@ export default function App() {
                   location: args.location,
                   country: args.country,
                   stayType: args.stayType || 'all',
-                  ...(args.minPriceEur ? { minPriceEur: Number(args.minPriceEur) } : {}),
-                  ...(args.maxPriceEur ? { maxPriceEur: Number(args.maxPriceEur) } : {}),
                 },
               ]);
             } else if (name === 'autoBookStay') {
@@ -2836,12 +2791,8 @@ export default function App() {
               void executeActions([
                 {
                   type: 'prepare_whatsapp',
-                  action: args.action,
                   message: args.message,
                   recipientFilter: args.recipientFilter,
-                  phone: args.phone,
-                  sendNow: args.sendNow !== undefined ? Boolean(args.sendNow) : undefined,
-                  autoClose: args.autoClose !== undefined ? Boolean(args.autoClose) : true,
                 },
               ]);
             } else if (name === 'setAlarm') {
@@ -2952,36 +2903,37 @@ export default function App() {
                   contactName: args.contactName,
                 },
               ]);
-            } else if (name === 'closePhoneApp') {
-              void executeActions([
-                {
-                  type: 'close_app',
-                  app: args.app || 'all',
-                },
-              ]);
             }
           } else if (msg.type === 'reconnect_needed' || msg.type === 'closed') {
             scheduleAutoReconnect();
           } else if (msg.type === 'error') {
-            if (shouldStayLiveRef.current) {
-              scheduleAutoReconnect(msg.message);
+            const isFatal =
+              Boolean(msg.fatal) ||
+              msg.status === 400 ||
+              msg.status === 401 ||
+              msg.status === 403 ||
+              msg.status === 404;
+            setVoiceError(msg.message || 'Błąd połączenia głosowego na żywo.');
+            if (shouldStayLiveRef.current && !isFatal) {
+              scheduleAutoReconnect(msg.message, false);
             } else {
-              setLiveErrorMessage(msg.message || 'Błąd połączenia głosowego na żywo.');
-              stopLiveSession(false, false);
-              setLiveStatus('error');
-              liveStatusRef.current = 'error';
+              scheduleAutoReconnect(msg.message, true);
             }
           }
         };
 
         ws.onerror = () => {
-          scheduleAutoReconnect();
+          scheduleAutoReconnect(
+            lang === 'de'
+              ? 'WebSocket-Verbindung fehlgeschlagen.'
+              : 'Błąd połączenia WebSocket /api/live.'
+          );
         };
 
         ws.onclose = () => {
-          if (shouldStayLiveRef.current) {
+          if (shouldStayLiveRef.current && voiceTransportModeRef.current === 'live') {
             scheduleAutoReconnect();
-          } else {
+          } else if (!shouldStayLiveRef.current) {
             stopLiveSession(false, false);
           }
         };
@@ -2993,25 +2945,27 @@ export default function App() {
           err?.name === 'TypeError'
         ) {
           shouldStayLiveRef.current = false;
-          setLiveErrorMessage(
+          const micErr =
             err?.name === 'NotFoundError'
               ? 'Nie wykryto mikrofonu na tym urządzeniu.'
-              : 'Nie udało się uruchomić mikrofonu do rozmowy na żywo. Sprawdź uprawnienia mikrofonu w przeglądarce.'
-          );
+              : 'Nie udało się uruchomić mikrofonu do rozmowy na żywo. Sprawdź uprawnienia mikrofonu w przeglądarce.';
+          setVoiceError(micErr);
+          setAssistantReply(micErr);
           stopLiveSession(false, false);
           setLiveStatus('error');
           liveStatusRef.current = 'error';
         } else if (shouldStayLiveRef.current) {
           wsStartupFailuresRef.current += 1;
-          if (wsStartupFailuresRef.current >= 3) {
+          if (wsStartupFailuresRef.current >= 2) {
             shouldStayLiveRef.current = false;
             stopLiveSession(false, false);
             setLiveStatus('error');
             liveStatusRef.current = 'error';
-            setLiveErrorMessage(
+            const errMsg =
               err?.message ||
-                'Nie udało się uruchomić sesji głosowej. Sprawdź połączenie z internetem i mikrofon.'
-            );
+              'Nie udało się uruchomić sesji głosowej. Sprawdź połączenie z internetem i mikrofon.';
+            setVoiceError(errMsg);
+            setAssistantReply(errMsg);
             return;
           }
           const attempt = reconnectAttemptRef.current;
@@ -3033,20 +2987,27 @@ export default function App() {
         }
       }
     },
-    [appendChatMessage, executeActions, speakWithMiekiszon, stopLiveSession]
+    [
+      appendChatMessage,
+      clearVoiceTimers,
+      executeActions,
+      resetVadBuffer,
+      stopLiveSession,
+    ]
   );
 
   useEffect(() => {
     const handleWakeup = () => {
       if (!shouldStayLiveRef.current) return;
       if (liveInputCtxRef.current?.state === 'suspended') {
-        void liveInputCtxRef.current.resume();
+        void liveInputCtxRef.current.resume().catch(() => {});
       }
       livePlayerRef.current?.resumeIfNeeded();
-      if (voiceTransportRef.current !== 'ws') return;
-      const ws = liveWsRef.current;
-      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-        void startLiveSessionWithOptions(voiceGenderRef.current, languageRef.current, true);
+      if (voiceTransportModeRef.current === 'live') {
+        const ws = liveWsRef.current;
+        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          void startLiveSessionWithOptions(voiceGenderRef.current, languageRef.current, true);
+        }
       }
     };
     document.addEventListener('visibilitychange', handleWakeup);
@@ -3198,115 +3159,28 @@ export default function App() {
   // ---------------------------------------------------------------------------
   // UI Handlers
   // ---------------------------------------------------------------------------
-  const handleLocationInputChange = useCallback((val: string) => {
-    setLocationInput(val);
-    locationRef.current = val;
-    setGpsError(null);
-    setIsGpsLocationActive(
-      Boolean(
-        val.trim() &&
-          gpsLocationLabelRef.current &&
-          val.trim() === gpsLocationLabelRef.current
-      )
-    );
-  }, []);
-
-  const handleAddManualAlarm = useCallback((time: string, label: string) => {
-    if (
-      typeof window !== 'undefined' &&
-      'Notification' in window &&
-      Notification.permission === 'default'
-    ) {
-      void Notification.requestPermission();
-    }
-    setAlarms((prev) => [
-      ...prev,
-      {
-        id: `alarm_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-        time: time || '07:00',
-        label: label || 'Budzik',
-        active: true,
-      },
-    ]);
-  }, []);
-
-  const handleAddManualReminder = useCallback((minutes: number, text: string) => {
-    if (
-      typeof window !== 'undefined' &&
-      'Notification' in window &&
-      Notification.permission === 'default'
-    ) {
-      void Notification.requestPermission();
-    }
-    const triggerMs = Date.now() + Math.max(1, minutes) * 60000;
-    const d = new Date(triggerMs);
-    const displayTime = `${String(d.getHours()).padStart(2, '0')}:${String(
-      d.getMinutes()
-    ).padStart(2, '0')}`;
-    setReminders((prev) => [
-      ...prev,
-      {
-        id: `rem_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-        text: text || 'Przypomnienie',
-        triggerAt: triggerMs,
-        displayTime,
-      },
-    ]);
-  }, []);
-
   const handleSelectTab = (tab: TabId) => {
     switchTab(tab);
     setDetachedWindow(null);
-    const hasCustomText = Boolean(locationInput.trim());
-    const useCoords = !hasCustomText || isGpsLocationActive ? coordinates : null;
-    const effectiveLoc = locationInput.trim() || (coordinates ? '' : '10115 Berlin');
-
-    if (tab === 'food' && !foodData && !isFoodLoading) {
-      void performFoodSearch(effectiveLoc, foodCategory, useCoords);
-    } else if (tab === 'stays' && !staysData && !isStaysLoading) {
-      void performStaysSearch(effectiveLoc, stayType, useCoords);
-    } else if (tab === 'transit' && !transitData && !isTransitLoading) {
-      void performTransitSearch(
-        transitMode,
-        transitFrom.trim() || effectiveLoc,
-        transitTo
-      );
+    if (tab === 'stays' && !staysData && !isStaysLoading && (locationInput.trim() || coordinates)) {
+      void performStaysSearch(locationInput, stayType, coordinates);
+    } else if (tab === 'food' && !foodData && !isFoodLoading && (locationInput.trim() || coordinates)) {
+      void performFoodSearch(locationInput, foodCategory, coordinates);
     }
   };
 
   const handleSelectFoodCategory = (cat: FoodCategory) => {
     setFoodCategory(cat);
-    const hasCustomText = Boolean(locationInput.trim());
-    const useCoords = !hasCustomText || isGpsLocationActive ? coordinates : null;
-    const effectiveLoc = locationInput.trim() || (coordinates ? '' : '10115 Berlin');
-    void performFoodSearch(effectiveLoc, cat, useCoords);
+    if (locationInput.trim() || coordinates) {
+      void performFoodSearch(locationInput, cat, coordinates);
+    }
   };
 
   const handleSelectStayType = (st: StayType) => {
     setStayType(st);
-    const hasCustomText = Boolean(locationInput.trim());
-    const useCoords = !hasCustomText || isGpsLocationActive ? coordinates : null;
-    const effectiveLoc = locationInput.trim() || (coordinates ? '' : '10115 Berlin');
-    void performStaysSearch(effectiveLoc, st, useCoords);
-  };
-
-  const handleSearchStaysByPrice = (
-    minPriceEur: number | null,
-    maxPriceEur: number | null
-  ) => {
-    const hasCustomText = Boolean(locationInput.trim());
-    const useCoords = !hasCustomText || isGpsLocationActive ? coordinates : null;
-    const effectiveLoc = locationInput.trim() || (coordinates ? '' : '10115 Berlin');
-    void performStaysSearch(
-      effectiveLoc,
-      stayType,
-      useCoords,
-      checkIn,
-      checkOut,
-      undefined,
-      minPriceEur,
-      maxPriceEur
-    );
+    if (locationInput.trim() || coordinates) {
+      void performStaysSearch(locationInput, st, coordinates);
+    }
   };
 
   const handleChangeCheckIn = (rawVal: string) => {
@@ -3329,17 +3203,14 @@ export default function App() {
     const finalOut = safeOut <= safeIn ? addDaysToIso(safeIn, 2) : safeOut;
     setCheckIn(safeIn);
     setCheckOut(finalOut);
-    const hasCustomText = Boolean(locationInput.trim());
-    const useCoords = !hasCustomText || isGpsLocationActive ? coordinates : null;
-    const effectiveLoc = locationInput.trim() || (coordinates ? '' : '10115 Berlin');
-    void performStaysSearch(effectiveLoc, stayType, useCoords, safeIn, finalOut);
+    if (locationInput.trim() || coordinates) {
+      void performStaysSearch(locationInput, stayType, coordinates, safeIn, finalOut);
+    }
   };
 
   const handleSelectTransitMode = (m: TransitMode) => {
     setTransitMode(m);
-    const effectiveFrom =
-      transitFrom.trim() || locationInput.trim() || (coordinates ? '' : '10115 Berlin');
-    void performTransitSearch(m, effectiveFrom, transitTo);
+    void performTransitSearch(m, transitFrom || locationInput, transitTo);
   };
 
   const handleQuickFuelNearby = () => {
@@ -3355,24 +3226,29 @@ export default function App() {
   };
 
   const handleBackFromDetachedWindow = () => {
-    performGoBack(1);
+    const target: TabId =
+      previousTab && previousTab !== detachedWindow ? previousTab : 'assistant';
+    setDetachedWindow(null);
+    switchTab(target);
   };
 
   const handleCloseFoodTab = () => {
-    performGoBack(1);
+    const fallbackTab: TabId =
+      previousTab && previousTab !== 'food' ? previousTab : 'assistant';
+    switchTab(fallbackTab);
   };
 
   const appBody = (
-    <div className="min-h-dvh overflow-x-hidden bg-[#05070B] bg-[radial-gradient(ellipse_85%_40%_at_50%_-10%,rgba(16,185,129,0.12),transparent_70%)] text-[#F1F5F9] flex flex-col">
+    <div className="min-h-dvh overflow-x-hidden bg-[#050505] text-[#F3F5F2] flex flex-col">
       {isGmpQuotaExceeded && (
-        <div className="bg-[#261B04] border-b border-[#F59E0B]/40 text-[#FCD34D] px-4 py-2 text-xs md:text-sm text-center shrink-0 z-50">
+        <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2 text-xs md:text-sm text-center shrink-0 z-50 shadow-sm">
           <span>
             Google Maps Platform quota reached. If you are the app owner, visit{' '}
             <a
               href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
               target="_blank"
               rel="noopener noreferrer"
-              className="underline font-semibold text-[#FDE68A] hover:text-white"
+              className="underline font-semibold text-amber-950 hover:text-amber-800"
             >
               maps developer site
             </a>{' '}
@@ -3384,31 +3260,13 @@ export default function App() {
       <Header
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
-        language={language}
-        onSelectLanguage={(lang) => void handleSelectLanguage(lang)}
         isLiveActive={isLiveActive}
         liveStatus={liveStatus}
         onToggleLive={handleToggleLive}
       />
 
-      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-3 py-4 sm:px-6 sm:py-6">
-        {activeTab !== 'assistant' && gpsError && (
-          <div
-            role="alert"
-            className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-[#5C1D22] bg-[#1F0B0D] px-4 py-2.5 text-xs text-[#FCA5A5]"
-          >
-            <span>{gpsError}</span>
-            <button
-              type="button"
-              onClick={() => setGpsError(null)}
-              className="font-semibold underline cursor-pointer shrink-0 hover:text-white"
-            >
-              Zamknij
-            </button>
-          </div>
-        )}
-
-        {/* Tab 1: Foreground Voice Controls */}
+      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-3 py-3 sm:px-6 sm:py-5">
+        {/* Tab 1: Pure Assistant Conversation Window (Full-interface vertical scrolling) */}
         {activeTab === 'assistant' && (
           <div className="flex flex-1 flex-col gap-4">
             <VoiceDock
@@ -3418,7 +3276,6 @@ export default function App() {
               onSelectVoiceGender={(g) => void handleSelectVoiceGender(g)}
               isLiveActive={isLiveActive}
               liveStatus={liveStatus}
-              liveErrorMessage={liveErrorMessage || undefined}
               micLevel={micLevel}
               onToggleLive={handleToggleLive}
               isMuted={isMuted}
@@ -3427,7 +3284,29 @@ export default function App() {
               cameraFacingMode={cameraFacingMode}
               videoError={videoError}
               videoPreviewRef={videoPreviewRef}
+              onToggleCamera={() => void handleToggleCamera()}
+              onSwitchCameraFacing={() => void handleSwitchCameraFacing()}
+              onToggleScreenShare={() => void handleToggleScreenShare()}
               onStopVideo={stopVideoShare}
+              assistantReply={assistantReply}
+              userTranscript={userTranscript}
+              voiceError={voiceError}
+              isVoiceProcessing={isVoiceProcessing}
+              canFinishUtterance={hasBufferedSpeech}
+              onFinishUtterance={handleFinishUtterance}
+              onReplayReply={handleReplayReply}
+              isCommandLoading={isCommandLoading}
+              onSubmitCommand={(txt) => void handleSubmitTextCommand(txt)}
+              alarms={alarms}
+              reminders={reminders}
+              onRemoveAlarm={(id) =>
+                setAlarms((prev) => prev.filter((a) => a.id !== id))
+              }
+              onRemoveReminder={(id) =>
+                setReminders((prev) => prev.filter((r) => r.id !== id))
+              }
+              lastLaunchedApp={lastLaunchedApp}
+              onDismissLaunchedApp={() => setLastLaunchedApp(null)}
               storyStatus={storyStatus}
               storyProgress={storyProgress}
               onPauseStory={() => {
@@ -3439,38 +3318,21 @@ export default function App() {
               onStopStory={() => {
                 storyPlayerRef.current?.stop();
               }}
+              onOpenCalculator={() => setIsCalculatorOpen(true)}
+              onOpenNotepad={() => setIsNotepadOpen(true)}
+              onOpenBrowser={() => setIsBrowserOpen(true)}
+              onOpenYoutube={() =>
+                void executeActions([
+                  {
+                    type: 'open_youtube',
+                    service: 'youtube_music',
+                    query: language === 'de' ? 'Musik Hits' : 'Polskie hity',
+                  },
+                ])
+              }
+              onOpenWhatsapp={() => setIsWhatsappModalOpen(true)}
+              notesCount={notepadNotes.length}
             />
-
-            {lastLaunchedApp && (
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#22C55E]/30 bg-[#081A10] px-4 py-3 text-xs">
-                <div>
-                  <span className="font-semibold text-[#4ADE80]">
-                    {language === 'de' ? 'Gestartet' : 'Uruchomiono'} ({lastLaunchedApp.appLabel}):
-                  </span>{' '}
-                  <span className="text-[#E2E8F0]">{lastLaunchedApp.title}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <a
-                    href={lastLaunchedApp.fallbackUrl || lastLaunchedApp.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-[#22C55E] px-3 text-xs font-semibold text-[#041409] hover:bg-[#4ADE80]"
-                  >
-                    <span>
-                      {language === 'de' ? 'Öffnen' : 'Otwórz'} {lastLaunchedApp.appLabel}
-                    </span>
-                    <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-                  </a>
-                  <button
-                    type="button"
-                    onClick={() => setLastLaunchedApp(null)}
-                    className="min-h-[36px] rounded-xl border border-white/[0.08] bg-[#111723] px-3 text-xs text-[#94A3B8] hover:text-white cursor-pointer"
-                  >
-                    {language === 'de' ? 'Schließen' : 'Zamknij'}
-                  </button>
-                </div>
-              </div>
-            )}
 
             {(activeYoutubeVideo || youtubeResults.length > 0 || isYoutubeLoading || youtubeError) && (
               <div className="w-full shrink-0">
@@ -3492,6 +3354,44 @@ export default function App() {
                     setYoutubeResults([]);
                     setYoutubeError(null);
                   }}
+                />
+              </div>
+            )}
+
+            {(isBrowserOpen || webSearchData || isWebSearchLoading || webSearchError || activeArticle || isArticleLoading) && (
+              <div className="w-full shrink-0">
+                <WebSearchResultsPanel
+                  language={language}
+                  isBrowserOpen={isBrowserOpen}
+                  data={webSearchData}
+                  isLoading={isWebSearchLoading}
+                  error={webSearchError}
+                  activeArticle={activeArticle}
+                  isArticleLoading={isArticleLoading}
+                  articleError={articleError}
+                  onSearchQuery={(q) => void performWebSearch(q, false)}
+                  onOpenArticle={(item, readAloud) =>
+                    void openBrowserArticle(item, Boolean(readAloud), (txt) => {
+                      setAssistantReply(txt);
+                      appendChatMessage('assistant', txt);
+                      void speakWithMiekiszon(txt);
+                    })
+                  }
+                  onCloseArticle={() => {
+                    setActiveArticle(null);
+                    setArticleError(null);
+                  }}
+                  onReadArticleAloud={(article) => {
+                    const speech = `${article.title}. ${article.content.slice(0, 750)}`;
+                    setAssistantReply(speech);
+                    appendChatMessage('assistant', speech);
+                    void speakWithMiekiszon(speech);
+                  }}
+                  onOpenExternalChrome={(q) =>
+                    launchExternalApp(getAppLaunchInfo('chrome', q))
+                  }
+                  onClose={() => void executeActions([{ type: 'close_browser' }])}
+                  onOpenDialer={(target) => setDialTarget(target)}
                 />
               </div>
             )}
@@ -3522,38 +3422,60 @@ export default function App() {
                 }}
               />
             )}
+            {(isBrowserOpen || webSearchData || isWebSearchLoading || webSearchError || activeArticle || isArticleLoading) && (
+              <WebSearchResultsPanel
+                language={language}
+                isBrowserOpen={isBrowserOpen}
+                data={webSearchData}
+                isLoading={isWebSearchLoading}
+                error={webSearchError}
+                activeArticle={activeArticle}
+                isArticleLoading={isArticleLoading}
+                articleError={articleError}
+                onSearchQuery={(q) => void performWebSearch(q, false)}
+                onOpenArticle={(item, readAloud) =>
+                  void openBrowserArticle(item, Boolean(readAloud), (txt) => {
+                    setAssistantReply(txt);
+                    appendChatMessage('assistant', txt);
+                    void speakWithMiekiszon(txt);
+                  })
+                }
+                onCloseArticle={() => {
+                  setActiveArticle(null);
+                  setArticleError(null);
+                }}
+                onReadArticleAloud={(article) => {
+                  const speech = `${article.title}. ${article.content.slice(0, 750)}`;
+                  setAssistantReply(speech);
+                  appendChatMessage('assistant', speech);
+                  void speakWithMiekiszon(speech);
+                }}
+                onOpenExternalChrome={(q) =>
+                  launchExternalApp(getAppLaunchInfo('chrome', q))
+                }
+                onClose={() => void executeActions([{ type: 'close_browser' }])}
+                onOpenDialer={(target) => setDialTarget(target)}
+              />
+            )}
             <FoodTab
               category={foodCategory}
               onSelectCategory={handleSelectFoodCategory}
               locationInput={locationInput}
-              onLocationInputChange={handleLocationInputChange}
-              onSearchByLocation={(locOverride?: string) => {
-                const targetLoc = (locOverride ?? locationInput).trim();
-                if (locOverride !== undefined) {
-                  handleLocationInputChange(locOverride);
-                }
-                setIsGpsLocationActive(false);
-                void performFoodSearch(
-                  targetLoc || (coordinates ? '' : '10115 Berlin'),
-                  foodCategory,
-                  targetLoc ? null : coordinates
-                );
-              }}
+              onLocationInputChange={setLocationInput}
+              onSearchByLocation={() =>
+                void performFoodSearch(locationInput, foodCategory, coordinates)
+              }
               onUseMyLocation={() => detectFastLocation(true, true)}
               hasGpsLock={Boolean(coordinates)}
               isLocating={isLocating}
-              coordinates={locationInput.trim() && !isGpsLocationActive ? undefined : coordinates}
+              coordinates={coordinates}
               hasMapsProvider={Boolean(mapsApiKey)}
               data={foodData}
               isLoading={isFoodLoading}
               error={foodError}
               onOpenDialer={(target) => setDialTarget(target)}
               onRetrySearch={() =>
-                void performFoodSearch(
-                  locationInput.trim() || (coordinates ? '' : '10115 Berlin'),
-                  foodCategory,
-                  locationInput.trim() && !isGpsLocationActive ? null : coordinates
-                )
+                void performFoodSearch(locationInput, foodCategory, coordinates)
               }
               onCloseTab={handleCloseFoodTab}
             />
@@ -3584,19 +3506,49 @@ export default function App() {
                 }}
               />
             )}
+            {(isBrowserOpen || webSearchData || isWebSearchLoading || webSearchError || activeArticle || isArticleLoading) && (
+              <WebSearchResultsPanel
+                language={language}
+                isBrowserOpen={isBrowserOpen}
+                data={webSearchData}
+                isLoading={isWebSearchLoading}
+                error={webSearchError}
+                activeArticle={activeArticle}
+                isArticleLoading={isArticleLoading}
+                articleError={articleError}
+                onSearchQuery={(q) => void performWebSearch(q, false)}
+                onOpenArticle={(item, readAloud) =>
+                  void openBrowserArticle(item, Boolean(readAloud), (txt) => {
+                    setAssistantReply(txt);
+                    appendChatMessage('assistant', txt);
+                    void speakWithMiekiszon(txt);
+                  })
+                }
+                onCloseArticle={() => {
+                  setActiveArticle(null);
+                  setArticleError(null);
+                }}
+                onReadArticleAloud={(article) => {
+                  const speech = `${article.title}. ${article.content.slice(0, 750)}`;
+                  setAssistantReply(speech);
+                  appendChatMessage('assistant', speech);
+                  void speakWithMiekiszon(speech);
+                }}
+                onOpenExternalChrome={(q) =>
+                  launchExternalApp(getAppLaunchInfo('chrome', q))
+                }
+                onClose={() => void executeActions([{ type: 'close_browser' }])}
+                onOpenDialer={(target) => setDialTarget(target)}
+              />
+            )}
             <StaysTab
               stayType={stayType}
               onSelectStayType={handleSelectStayType}
               locationInput={locationInput}
-              onLocationInputChange={handleLocationInputChange}
-              onSearchByLocation={() => {
-                setIsGpsLocationActive(false);
-                void performStaysSearch(
-                  locationInput.trim() || (coordinates ? '' : '10115 Berlin'),
-                  stayType,
-                  locationInput.trim() ? null : coordinates
-                );
-              }}
+              onLocationInputChange={setLocationInput}
+              onSearchByLocation={() =>
+                void performStaysSearch(locationInput, stayType, coordinates)
+              }
               onUseMyLocation={() => detectFastLocation(true, true)}
               hasGpsLock={Boolean(coordinates)}
               isLocating={isLocating}
@@ -3628,13 +3580,8 @@ export default function App() {
               }
               onOpenDialer={(target) => setDialTarget(target)}
               onRetrySearch={() =>
-                void performStaysSearch(
-                  locationInput.trim() || (coordinates ? '' : '10115 Berlin'),
-                  stayType,
-                  locationInput.trim() && !isGpsLocationActive ? null : coordinates
-                )
+                void performStaysSearch(locationInput, stayType, coordinates)
               }
-              onSearchByPrice={handleSearchStaysByPrice}
               onOpenDetached={() => setDetachedWindow('stays')}
             />
           </div>
@@ -3664,6 +3611,41 @@ export default function App() {
                 }}
               />
             )}
+            {(isBrowserOpen || webSearchData || isWebSearchLoading || webSearchError || activeArticle || isArticleLoading) && (
+              <WebSearchResultsPanel
+                language={language}
+                isBrowserOpen={isBrowserOpen}
+                data={webSearchData}
+                isLoading={isWebSearchLoading}
+                error={webSearchError}
+                activeArticle={activeArticle}
+                isArticleLoading={isArticleLoading}
+                articleError={articleError}
+                onSearchQuery={(q) => void performWebSearch(q, false)}
+                onOpenArticle={(item, readAloud) =>
+                  void openBrowserArticle(item, Boolean(readAloud), (txt) => {
+                    setAssistantReply(txt);
+                    appendChatMessage('assistant', txt);
+                    void speakWithMiekiszon(txt);
+                  })
+                }
+                onCloseArticle={() => {
+                  setActiveArticle(null);
+                  setArticleError(null);
+                }}
+                onReadArticleAloud={(article) => {
+                  const speech = `${article.title}. ${article.content.slice(0, 750)}`;
+                  setAssistantReply(speech);
+                  appendChatMessage('assistant', speech);
+                  void speakWithMiekiszon(speech);
+                }}
+                onOpenExternalChrome={(q) =>
+                  launchExternalApp(getAppLaunchInfo('chrome', q))
+                }
+                onClose={() => void executeActions([{ type: 'close_browser' }])}
+                onOpenDialer={(target) => setDialTarget(target)}
+              />
+            )}
             <TransitTab
               mode={transitMode}
               onSelectMode={handleSelectTransitMode}
@@ -3691,76 +3673,10 @@ export default function App() {
             />
           </div>
         )}
-        {/* Tab 5: Tools, Camera, YouTube, WhatsApp, Calculator, Notepad, Alarms & Reminders */}
-        {activeTab === 'tools' && (
-          <div className="flex-1 space-y-4">
-            {(activeYoutubeVideo || youtubeResults.length > 0 || isYoutubeLoading || youtubeError) && (
-              <YouTubePlayerPanel
-                language={language}
-                query={youtubeQuery}
-                results={youtubeResults}
-                activeVideo={activeYoutubeVideo}
-                isLoading={isYoutubeLoading}
-                error={youtubeError}
-                onSelectVideo={(vid) => setActiveYoutubeVideo(vid)}
-                onPlayAnother={() =>
-                  void executeActions([
-                    { type: 'select_youtube_track', randomTrack: true, nextTrack: true },
-                  ])
-                }
-                onClose={() => {
-                  setActiveYoutubeVideo(null);
-                  setYoutubeResults([]);
-                  setYoutubeError(null);
-                }}
-              />
-            )}
-            <ToolsTab
-              language={language}
-              videoMode={videoMode}
-              cameraFacingMode={cameraFacingMode}
-              videoError={videoError}
-              videoPreviewRef={videoPreviewRef}
-              onToggleCamera={() => void handleToggleCamera()}
-              onSwitchCameraFacing={() => void handleSwitchCameraFacing()}
-              onToggleScreenShare={() => void handleToggleScreenShare()}
-              onStopVideo={stopVideoShare}
-              alarms={alarms}
-              reminders={reminders}
-              onAddAlarm={handleAddManualAlarm}
-              onRemoveAlarm={(id) =>
-                setAlarms((prev) => prev.filter((a) => a.id !== id))
-              }
-              onAddReminder={handleAddManualReminder}
-              onRemoveReminder={(id) =>
-                setReminders((prev) => prev.filter((r) => r.id !== id))
-              }
-              lastLaunchedApp={lastLaunchedApp}
-              onDismissLaunchedApp={() => setLastLaunchedApp(null)}
-              onOpenCalculator={() => setIsCalculatorOpen(true)}
-              onOpenNotepad={() => setIsNotepadOpen(true)}
-              onOpenYoutube={() =>
-                void executeActions([
-                  {
-                    type: 'open_youtube',
-                    service: 'youtube_music',
-                    query: language === 'de' ? 'Musik Hits' : 'Polskie hity',
-                  },
-                ])
-              }
-              onOpenWhatsapp={() => setIsWhatsappModalOpen(true)}
-              onOpenBrowser={() => {
-                setIsBrowserOpen(true);
-                isBrowserOpenRef.current = true;
-              }}
-              notesCount={notepadNotes.length}
-            />
-          </div>
-        )}
       </main>
 
-      <footer className="shrink-0 border-t border-white/[0.06] bg-[#06090F] py-3">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 text-[11px] text-[#64748B] sm:px-6">
+      <footer className="shrink-0 border-t border-[#141814] bg-[#050505] py-2.5">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 text-[11px] text-[#6B7369] sm:px-6">
           <span>Miękiszon</span>
           <span>PL / DE</span>
         </div>
@@ -3795,20 +3711,52 @@ export default function App() {
             />
           </div>
         )}
+        {(isBrowserOpen || webSearchData || isWebSearchLoading || webSearchError || activeArticle || isArticleLoading) && (
+          <div className="mb-4">
+            <WebSearchResultsPanel
+              language={language}
+              isBrowserOpen={isBrowserOpen}
+              data={webSearchData}
+              isLoading={isWebSearchLoading}
+              error={webSearchError}
+              activeArticle={activeArticle}
+              isArticleLoading={isArticleLoading}
+              articleError={articleError}
+              onSearchQuery={(q) => void performWebSearch(q, false)}
+              onOpenArticle={(item, readAloud) =>
+                void openBrowserArticle(item, Boolean(readAloud), (txt) => {
+                  setAssistantReply(txt);
+                  appendChatMessage('assistant', txt);
+                  void speakWithMiekiszon(txt);
+                })
+              }
+              onCloseArticle={() => {
+                setActiveArticle(null);
+                setArticleError(null);
+              }}
+              onReadArticleAloud={(article) => {
+                const speech = `${article.title}. ${article.content.slice(0, 750)}`;
+                setAssistantReply(speech);
+                appendChatMessage('assistant', speech);
+                void speakWithMiekiszon(speech);
+              }}
+              onOpenExternalChrome={(q) =>
+                launchExternalApp(getAppLaunchInfo('chrome', q))
+              }
+              onClose={() => void executeActions([{ type: 'close_browser' }])}
+              onOpenDialer={(target) => setDialTarget(target)}
+            />
+          </div>
+        )}
         {detachedWindow === 'stays' && (
           <StaysTab
             stayType={stayType}
             onSelectStayType={handleSelectStayType}
             locationInput={locationInput}
-            onLocationInputChange={handleLocationInputChange}
-            onSearchByLocation={() => {
-              setIsGpsLocationActive(false);
-              void performStaysSearch(
-                locationInput.trim() || (coordinates ? '' : '10115 Berlin'),
-                stayType,
-                locationInput.trim() ? null : coordinates
-              );
-            }}
+            onLocationInputChange={setLocationInput}
+            onSearchByLocation={() =>
+              void performStaysSearch(locationInput, stayType, coordinates)
+            }
             onUseMyLocation={() => detectFastLocation(true, true)}
             hasGpsLock={Boolean(coordinates)}
             isLocating={isLocating}
@@ -3840,13 +3788,8 @@ export default function App() {
             }
             onOpenDialer={(target) => setDialTarget(target)}
             onRetrySearch={() =>
-              void performStaysSearch(
-                locationInput.trim() || (coordinates ? '' : '10115 Berlin'),
-                stayType,
-                locationInput.trim() && !isGpsLocationActive ? null : coordinates
-              )
+              void performStaysSearch(locationInput, stayType, coordinates)
             }
-            onSearchByPrice={handleSearchStaysByPrice}
           />
         )}
         {detachedWindow === 'transit' && (
@@ -3927,28 +3870,6 @@ export default function App() {
         }
         onClearAll={() => setNotepadNotes([])}
         onClose={() => setIsNotepadOpen(false)}
-      />
-
-      <BrowserModal
-        isOpen={isBrowserOpen}
-        language={language}
-        query={browserQuery}
-        data={browserData}
-        isLoading={isBrowserLoading}
-        error={browserError}
-        article={browserArticle}
-        isArticleLoading={isBrowserArticleLoading}
-        canGoBack={Boolean(browserArticle) || browserHistoryRef.current.length > 0}
-        onSearch={(q) => void performBrowserSearch(q, false, true)}
-        onSelectArticle={(item) => void performOpenBrowserArticle(item, false)}
-        onReadArticleAloud={(txt) => void speakWithMiekiszon(txt.slice(0, 750))}
-        onGoBack={() => performGoBack(1)}
-        onClose={() => {
-          setIsBrowserOpen(false);
-          isBrowserOpenRef.current = false;
-          setBrowserArticle(null);
-          browserArticleRef.current = null;
-        }}
       />
 
       <OfflineIndicator />

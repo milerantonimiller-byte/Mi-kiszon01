@@ -108,7 +108,7 @@ function detectGermanContext(input: string, explicitCountry?: string): boolean {
   if (!input) return false;
   return (
     /\b(niemcy|niemczech|niemiecki|deutschland|germany|plz|de)\b/i.test(input) ||
-    /\b(?:DE|D)[-\s]?\d{5}\b/i.test(input)
+    /\bDE[-\s]?\d{5}\b/i.test(input)
   );
 }
 
@@ -117,8 +117,9 @@ function sanitizeCodeTokensInQuery(input: string, explicitCountry?: string): str
   const isGerman = detectGermanContext(input, explicitCountry);
   let normalized = input.trim();
 
-  normalized = normalized.replace(/\b(?:DE|D)[-\s]+(\d{2})[-–—\s]?(\d{3})\b/gi, '$1$2');
-  normalized = normalized.replace(/\bPL[-\s]+(\d{2}-\d{3})\b/gi, '$1');
+  if (isGerman) {
+    normalized = normalized.replace(/\b(?:DE|D)[-\s]+(\d{2})[-–—\s]?(\d{3})\b/gi, '$1$2');
+  }
 
   return normalized
     .split(/\s+/)
@@ -163,38 +164,8 @@ function setCachedPayload(key: string, payload: any, ttlMs = 180_000): void {
 function resolveCountryMeta(
   input: string,
   explicitCountry?: string
-): { regionCode?: string; countryName?: string; inferredFiveDigit?: boolean } {
+): { regionCode?: string; countryName?: string } {
   const combined = `${explicitCountry || ''} ${input || ''}`.trim().toLowerCase();
-
-  // Explicit non-DE/PL countries & major cities first so 5-digit foreign ZIPs aren't forced to DE
-  if (/\b(franc\w*|frankreich|france|paris|lyon|marseille|toulouse|nice|fr)\b/i.test(combined)) {
-    return { regionCode: 'FR', countryName: 'France' };
-  }
-  if (/\b(austr\w*|österreich|wien|wiedeń|graz|linz|salzburg|innsbruck|at)\b/i.test(combined)) {
-    return { regionCode: 'AT', countryName: 'Austria' };
-  }
-  if (/\b(czech\w*|tschech\w*|česk\w*|praha|praga|brno|ostrava|cz)\b/i.test(combined)) {
-    return { regionCode: 'CZ', countryName: 'Czechia' };
-  }
-  if (/\b(szwajc\w*|schweiz|switzerland|zürich|zurich|zurych|geneva|genewa|basel|bern|ch)\b/i.test(combined)) {
-    return { regionCode: 'CH', countryName: 'Switzerland' };
-  }
-  if (/\b(holand\w*|niderland\w*|niederlande|netherlands|amsterdam|rotterdam|utrecht|eindhoven|nl)\b/i.test(combined)) {
-    return { regionCode: 'NL', countryName: 'Netherlands' };
-  }
-  if (/\b(włoch\w*|ital\w*|roma|rzym|milano|mediolan|napoli|neapol|torino|venezia|wenecja|florence|it)\b/i.test(combined)) {
-    return { regionCode: 'IT', countryName: 'Italy' };
-  }
-  if (/\b(hiszpan\w*|span\w*|madrid|madryt|barcelona|valencia|sevilla|es)\b/i.test(combined)) {
-    return { regionCode: 'ES', countryName: 'Spain' };
-  }
-  if (/\b(uk|gb|england|wielk\w*\s+bryt\w*|united kingdom|london|londyn|manchester|birmingham|liverpool)\b/i.test(combined)) {
-    return { regionCode: 'GB', countryName: 'United Kingdom' };
-  }
-  if (/\b(usa|united states|stany zjednoczone|new york|miami|los angeles|chicago)\b/i.test(combined)) {
-    return { regionCode: 'US', countryName: 'United States' };
-  }
-
   if (
     detectGermanContext(input, explicitCountry) ||
     /\bdeu?\b/i.test(explicitCountry || '')
@@ -202,23 +173,34 @@ function resolveCountryMeta(
     return { regionCode: 'DE', countryName: 'Germany' };
   }
   if (
-    /\b(polsk[aieę]|poland|polen|warszawa|warsaw|kraków|krakow|wrocław|wroclaw|gdańsk|gdansk|poznań|poznan|łódź|lodz|szczecin|lublin|katowice|bydgoszcz|białystok|bialystok|gdynia|częstochowa|radom|toruń|torun|rzeszów|rzeszow|kielce|olsztyn|opole|zakopane|pl)\b/i.test(
-      combined
-    ) ||
-    (!explicitCountry && /\b\d{2}-\d{3}\b/.test(input || ''))
+    /\b(polsk[aieę]|poland|polen|pl)\b/i.test(combined) ||
+    (!explicitCountry && /^\d{2}-\d{3}$/.test((input || '').trim()))
   ) {
     return { regionCode: 'PL', countryName: 'Poland' };
   }
-  if (
-    /\b(berlin|münchen|munchen|monachium|hamburg|köln|koln|kolonia|frankfurt|stuttgart|düsseldorf|dusseldorf|dortmund|essen|leipzig|lipsk|bremen|brema|dresden|drezno|hannover|hanower|nürnberg|nurnberg|norymberga|duisburg|bochum|wuppertal|bielefeld|bonn|münster|munster|karlsruhe|mannheim|augsburg|wiesbaden|kiel|aachen|rostock|potsdam|lübeck|lubeck|erfurt|mainz|moguncja|freiburg|heidelberg|regensburg|ulm|passau|cottbus|flensburg|greifswald|schwerin|magdeburg|halle|kassel|osnabrück|oldenburg|würzburg|ingolstadt|trier|koblenz|wolfsburg)\b/i.test(
-      combined
-    )
-  ) {
-    return { regionCode: 'DE', countryName: 'Germany' };
+  if (/\b(franc\w*|frankreich|france|fr)\b/i.test(combined)) {
+    return { regionCode: 'FR', countryName: 'France' };
   }
-  // Bare 5-digit postal code (e.g. "10115", "80331") prioritizes Germany with fallback to global
-  if (!explicitCountry && /\b\d{5}\b/.test(input || '')) {
-    return { regionCode: 'DE', countryName: 'Germany', inferredFiveDigit: true };
+  if (/\b(austr\w*|österreich|at)\b/i.test(combined)) {
+    return { regionCode: 'AT', countryName: 'Austria' };
+  }
+  if (/\b(czech\w*|tschech\w*|česk\w*|cz)\b/i.test(combined)) {
+    return { regionCode: 'CZ', countryName: 'Czechia' };
+  }
+  if (/\b(szwajc\w*|schweiz|switzerland|ch)\b/i.test(combined)) {
+    return { regionCode: 'CH', countryName: 'Switzerland' };
+  }
+  if (/\b(holand\w*|niderland\w*|niederlande|netherlands|nl)\b/i.test(combined)) {
+    return { regionCode: 'NL', countryName: 'Netherlands' };
+  }
+  if (/\b(włoch\w*|ital\w*|it)\b/i.test(combined)) {
+    return { regionCode: 'IT', countryName: 'Italy' };
+  }
+  if (/\b(hiszpan\w*|span\w*|es)\b/i.test(combined)) {
+    return { regionCode: 'ES', countryName: 'Spain' };
+  }
+  if (/\b(uk|gb|england|wielk\w*\s+bryt\w*|united kingdom)\b/i.test(combined)) {
+    return { regionCode: 'GB', countryName: 'United Kingdom' };
   }
   return {};
 }
@@ -244,7 +226,7 @@ async function resolvePostalBiasCoords(
   regionCode: string | undefined,
   mapsApiKey: string
 ): Promise<{ lat: number; lng: number } | null> {
-  if (!placesLocationText) return null;
+  if (!placesLocationText || !/\d/.test(placesLocationText)) return null;
   const geoKey = `geo|${regionCode || ''}|${placesLocationText.toLowerCase()}`;
   const cached = getCachedPayload<{ lat: number; lng: number } | null>(geoKey);
   if (cached) return cached;
@@ -255,7 +237,7 @@ async function resolvePostalBiasCoords(
         `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
           placesLocationText
         )}${regionCode ? `&region=${regionCode}` : ''}&key=${mapsApiKey}`,
-        { signal: AbortSignal.timeout(1500) }
+        { signal: AbortSignal.timeout(1200) }
       );
       if (gRes.ok) {
         const gJson: any = await gRes.json();
@@ -272,18 +254,13 @@ async function resolvePostalBiasCoords(
   }
 
   try {
-    const stripped = placesLocationText.replace(/,\s*(Germany|Poland|Deutschland|Polska)$/i, '').trim();
-    const isPostalOnly = /^(?:\d{5}|\d{2}-\d{3})$/.test(stripped);
-    const baseParams = isPostalOnly
-      ? `postalcode=${encodeURIComponent(stripped)}`
-      : `q=${encodeURIComponent(placesLocationText)}`;
     const nRes = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&limit=1&${baseParams}${
-        regionCode ? `&countrycodes=${regionCode.toLowerCase()}` : ''
-      }`,
+      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
+        placesLocationText
+      )}${regionCode ? `&countrycodes=${regionCode.toLowerCase()}` : ''}`,
       {
         headers: { 'User-Agent': 'MiekiszonAssistant/1.0' },
-        signal: AbortSignal.timeout(1800),
+        signal: AbortSignal.timeout(1200),
       }
     );
     if (nRes.ok) {
@@ -453,8 +430,7 @@ function buildBookingUrl(
   checkIn?: string,
   checkOut?: string,
   guests = 2,
-  countryLabel = '',
-  maxPriceEur?: number | null
+  countryLabel = ''
 ): string {
   const params = new URLSearchParams();
   params.set('ss', `${name} ${city} ${countryLabel}`.replace(/\s+/g, ' ').trim());
@@ -462,9 +438,6 @@ function buildBookingUrl(
   if (checkOut) params.set('checkout', checkOut);
   params.set('group_adults', String(guests));
   params.set('no_rooms', '1');
-  if (typeof maxPriceEur === 'number' && maxPriceEur > 0) {
-    params.set('nflt', `price=EUR-0-${Math.round(maxPriceEur)}-1`);
-  }
   return `https://www.booking.com/searchresults.pl.html?${params.toString()}`;
 }
 
@@ -473,8 +446,7 @@ function buildAirbnbUrl(
   checkIn?: string,
   checkOut?: string,
   guests = 2,
-  countryLabel = '',
-  maxPriceEur?: number | null
+  countryLabel = ''
 ): string {
   const locationPart = [city, countryLabel].filter(Boolean).join(', ') || 'Europe';
   const query = encodeURIComponent(locationPart);
@@ -482,9 +454,6 @@ function buildAirbnbUrl(
   if (checkIn) params.set('checkin', checkIn);
   if (checkOut) params.set('checkout', checkOut);
   params.set('adults', String(guests));
-  if (typeof maxPriceEur === 'number' && maxPriceEur > 0) {
-    params.set('price_max', String(Math.round(maxPriceEur)));
-  }
   return `https://www.airbnb.pl/s/${query}/homes?${params.toString()}`;
 }
 
@@ -551,196 +520,178 @@ function formatFriendlyApiError(
   err: any,
   fallback: string
 ): { status: number; message: string } {
-  const msg = String(err?.message || err || '');
-  if (isQuotaOrRateError(err)) {
-    return {
-      status: 429,
-      message:
-        'Przekroczono chwilowy limit zapytań Gemini API (429). Spróbuj ponownie za chwilę lub sprawdź plan i klucz API w Settings > Secrets.',
-    };
-  }
-  if (msg.includes('403') || msg.includes('PERMISSION_DENIED')) {
-    return {
-      status: 403,
-      message:
-        'Brak uprawnień klucza Gemini API (403). Sprawdź konfigurację klucza w Settings > Secrets.',
-    };
-  }
-  if (msg.includes('400') || msg.includes('API_KEY_INVALID')) {
-    return {
-      status: 400,
-      message:
-        'Nieprawidłowy klucz Gemini API (400). Sprawdź klucz w Settings > Secrets.',
-    };
-  }
-  if (/^\s*\{.*"error"\s*:/.test(msg)) {
+  const rawMsg = String(err?.message || err || '');
+  let msg = rawMsg;
+  let parsedCode: number | null = null;
+
+  if (/^\s*\{.*"error"\s*:/.test(rawMsg)) {
     try {
-      const parsed = JSON.parse(msg);
+      const parsed = JSON.parse(rawMsg);
       if (parsed?.error?.message) {
-        return { status: Number(parsed.error.code) || 500, message: String(parsed.error.message) };
+        msg = String(parsed.error.message);
+        if (parsed?.error?.code) {
+          parsedCode = Number(parsed.error.code) || null;
+        }
       }
     } catch {
       // fall through
     }
   }
-  return { status: 500, message: msg || fallback };
+
+  if (isQuotaOrRateError(err) || parsedCode === 429) {
+    return {
+      status: 429,
+      message:
+        'Przekroczono chwilowy limit zapytań Gemini API (429). Spróbuj ponownie za chwilę lub sprawdź plan i klucz API.',
+    };
+  }
+  if (msg.includes('401') || msg.includes('UNAUTHENTICATED') || parsedCode === 401) {
+    return {
+      status: 401,
+      message:
+        'Błąd autoryzacji Gemini API (401). Sprawdź poprawność klucza GEMINI_API_KEY w zmiennych środowiskowych.',
+    };
+  }
+  if (msg.includes('403') || msg.includes('PERMISSION_DENIED') || parsedCode === 403) {
+    return {
+      status: 403,
+      message:
+        'Brak uprawnień klucza Gemini API (403). Sprawdź konfigurację klucza i uprawnienia projektu.',
+    };
+  }
+  if (msg.includes('404') || msg.includes('NOT_FOUND') || parsedCode === 404) {
+    return {
+      status: 404,
+      message:
+        'Wybrany model Gemini nie jest dostępny (404). Zweryfikuj nazwę modelu lub uprawnienia klucza.',
+    };
+  }
+  if (
+    msg.includes('API_KEY_INVALID') ||
+    msg.includes('API key not valid') ||
+    parsedCode === 400
+  ) {
+    return {
+      status: 400,
+      message:
+        msg.includes('API_KEY_INVALID') || msg.includes('API key not valid')
+          ? 'Nieprawidłowy klucz Gemini API (400). Sprawdź klucz GEMINI_API_KEY w konfiguracji serwera.'
+          : `Nieprawidłowe żądanie do Gemini API (400): ${msg}`,
+    };
+  }
+  if (msg.includes('503') || msg.includes('UNAVAILABLE') || parsedCode === 503) {
+    return {
+      status: 503,
+      message:
+        'Usługa Gemini API jest chwilowo niedostępna (503). Spróbuj ponownie za moment.',
+    };
+  }
+  return { status: parsedCode || 500, message: msg || fallback };
+}
+
+function parseModelJsonObject<T = Record<string, any>>(rawText?: string | null): T | null {
+  if (!rawText) return null;
+  let cleaned = rawText.trim();
+  if (!cleaned) return null;
+  const fenceMatch = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(cleaned);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim();
+  }
+  try {
+    const parsed = JSON.parse(cleaned);
+    return parsed && typeof parsed === 'object' ? (parsed as T) : null;
+  } catch {
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+      try {
+        const parsed = JSON.parse(cleaned.slice(start, end + 1));
+        return parsed && typeof parsed === 'object' ? (parsed as T) : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+function normalizeAudioMimeType(rawMime?: string | null): string {
+  const base = String(rawMime || 'audio/wav')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+  if (
+    base === 'audio/wav' ||
+    base === 'audio/wave' ||
+    base === 'audio/x-wav'
+  ) {
+    return 'audio/wav';
+  }
+  if (base === 'audio/mp4' || base === 'audio/m4a' || base === 'audio/x-m4a') {
+    return 'audio/mp4';
+  }
+  if (base === 'audio/mpeg' || base === 'audio/mp3') {
+    return 'audio/mp3';
+  }
+  if (base === 'audio/ogg' || base === 'audio/opus') {
+    return 'audio/ogg';
+  }
+  if (base === 'audio/webm') {
+    return 'audio/webm';
+  }
+  return base || 'audio/wav';
 }
 
 interface NominatimBounds {
   lat: number;
   lng: number;
   viewbox: string; // left,top,right,bottom
-  widerViewbox: string;
   resolvedLocation: string;
   countryName?: string;
-}
-
-async function fetchNominatimCandidates(url: string): Promise<any[]> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const resp = await fetch(url, {
-        headers: { 'User-Agent': 'MiekiszonAssistant/1.0' },
-        signal: AbortSignal.timeout(4500),
-      });
-      if ((resp.status === 429 || resp.status === 503) && attempt === 0) {
-        await new Promise((r) => setTimeout(r, 600));
-        continue;
-      }
-      if (!resp.ok) return [];
-      const data = await resp.json();
-      return Array.isArray(data) ? data : [];
-    } catch {
-      return [];
-    }
-  }
-  return [];
-}
-
-function pickBestNominatimPlace(arr: any[]): any | null {
-  if (!Array.isArray(arr) || arr.length === 0) return null;
-  const preferred = arr.find(
-    (item) =>
-      item?.category === 'boundary' ||
-      item?.category === 'place' ||
-      item?.addresstype === 'postcode' ||
-      item?.addresstype === 'city' ||
-      item?.addresstype === 'town' ||
-      item?.addresstype === 'village'
-  );
-  return preferred || arr[0];
 }
 
 async function resolveNominatimBounds(
   cleanLocation: string,
   coordinates?: { lat: number; lng: number },
-  regionCode?: string,
-  allowGlobalFallback = false
+  regionCode?: string
 ): Promise<NominatimBounds | null> {
   if (cleanLocation) {
-    const boundsCacheKey = `bounds|${regionCode || ''}|${cleanLocation.toLowerCase()}`;
-    const cachedBounds = getCachedPayload<NominatimBounds>(boundsCacheKey);
-    if (cachedBounds) return cachedBounds;
-    const ccParam = regionCode ? `&countrycodes=${regionCode.toLowerCase()}` : '';
-    const plPostal = cleanLocation.match(/\b(\d{2}-\d{3})\b/)?.[1];
-    const fiveDigitPostal = cleanLocation.match(/\b(\d{5})\b/)?.[1];
-    const postalCodeToken = plPostal || fiveDigitPostal || '';
-    const remainderCity = postalCodeToken
-      ? cleanLocation.replace(postalCodeToken, '').replace(/[,]+/g, ' ').trim()
-      : cleanLocation.trim();
-
-    let first: any = null;
-
-    // 1. Structured postal code query when user entered a bare postal code (e.g. "10115" or "00-001")
-    if (postalCodeToken && !remainderCity) {
-      const candidates = await fetchNominatimCandidates(
-        `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=3&postalcode=${encodeURIComponent(
-          postalCodeToken
-        )}${ccParam}`
-      );
-      first = pickBestNominatimPlace(candidates);
-    }
-
-    // 2. General search with city + postal code or pure city name
-    if (!first) {
-      const candidates = await fetchNominatimCandidates(
-        `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=5&q=${encodeURIComponent(
-          cleanLocation
-        )}${ccParam}`
-      );
-      first = pickBestNominatimPlace(candidates);
-    }
-
-    // 3. Fallback to structured postal code alone if combined "postal + district/word" failed
-    if (!first && postalCodeToken && remainderCity) {
-      const candidates = await fetchNominatimCandidates(
-        `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=3&postalcode=${encodeURIComponent(
-          postalCodeToken
-        )}${ccParam}`
-      );
-      first = pickBestNominatimPlace(candidates);
-    }
-
-    // 4. Global fallback when 5-digit code (e.g. 90210 or 75001) did not exist in DE
-    if (!first && allowGlobalFallback && regionCode) {
-      const globalUrl = postalCodeToken && !remainderCity
-        ? `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=3&postalcode=${encodeURIComponent(
-            postalCodeToken
-          )}`
-        : `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=5&q=${encodeURIComponent(
-            cleanLocation
-          )}`;
-      const candidates = await fetchNominatimCandidates(globalUrl);
-      first = pickBestNominatimPlace(candidates);
-    }
-
-    const lat = Number(first?.lat);
-    const lng = Number(first?.lon);
-    if (Number.isFinite(lat) && Number.isFinite(lng)) {
-      const bb = Array.isArray(first?.boundingbox) ? first.boundingbox.map(Number) : null;
-      const delta = 0.04;
-      const widerDelta = 0.10;
-      const south = bb && Number.isFinite(bb[0]) ? Math.min(bb[0], lat - delta) : lat - delta;
-      const north = bb && Number.isFinite(bb[1]) ? Math.max(bb[1], lat + delta) : lat + delta;
-      const west = bb && Number.isFinite(bb[2]) ? Math.min(bb[2], lng - delta) : lng - delta;
-      const east = bb && Number.isFinite(bb[3]) ? Math.max(bb[3], lng + delta) : lng + delta;
-
-      const wSouth = Math.min(south, lat - widerDelta);
-      const wNorth = Math.max(north, lat + widerDelta);
-      const wWest = Math.min(west, lng - widerDelta);
-      const wEast = Math.max(east, lng + widerDelta);
-
-      const addr = first?.address || {};
-      const cityName =
-        addr.city ||
-        addr.town ||
-        addr.village ||
-        addr.municipality ||
-        addr.county ||
-        first?.name ||
-        cleanLocation;
-      const resolvedPostal =
-        addr.country_code === 'de'
-          ? stripHyphensForCodeOnly(addr.postcode || postalCodeToken || '')
-          : addr.postcode || postalCodeToken || '';
-      const resolvedLocation =
-        resolvedPostal && cityName && !cityName.includes(resolvedPostal)
-          ? `${cityName} (${resolvedPostal})`
-          : cityName || cleanLocation;
-
-      const resultBounds: NominatimBounds = {
-        lat,
-        lng,
-        viewbox: `${west},${north},${east},${south}`,
-        widerViewbox: `${wWest},${wNorth},${wEast},${wSouth}`,
-        resolvedLocation,
-        countryName: addr.country || undefined,
-      };
-      setCachedPayload(
-        `bounds|${regionCode || ''}|${cleanLocation.toLowerCase()}`,
-        resultBounds,
-        3_600_000
-      );
-      return resultBounds;
+    try {
+      const nUrl = `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=1&q=${encodeURIComponent(
+        cleanLocation
+      )}${regionCode ? `&countrycodes=${regionCode.toLowerCase()}` : ''}`;
+      const resp = await fetch(nUrl, {
+        headers: { 'User-Agent': 'MiekiszonAssistant/1.0' },
+        signal: AbortSignal.timeout(4500),
+      });
+      if (resp.ok) {
+        const arr: any = await resp.json();
+        const first = Array.isArray(arr) ? arr[0] : null;
+        const lat = Number(first?.lat);
+        const lng = Number(first?.lon);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          const bb = Array.isArray(first?.boundingbox) ? first.boundingbox.map(Number) : null;
+          const delta = 0.035;
+          const south = bb && Number.isFinite(bb[0]) ? Math.min(bb[0], lat - delta) : lat - delta;
+          const north = bb && Number.isFinite(bb[1]) ? Math.max(bb[1], lat + delta) : lat + delta;
+          const west = bb && Number.isFinite(bb[2]) ? Math.min(bb[2], lng - delta) : lng - delta;
+          const east = bb && Number.isFinite(bb[3]) ? Math.max(bb[3], lng + delta) : lng + delta;
+          const addr = first?.address || {};
+          const cityName =
+            addr.city || addr.town || addr.village || addr.municipality || first?.name || cleanLocation;
+          return {
+            lat,
+            lng,
+            viewbox: `${west},${north},${east},${south}`,
+            resolvedLocation: first?.display_name
+              ? `${cityName}${addr.postcode ? ` (${addr.postcode})` : ''}`
+              : cleanLocation,
+            countryName: addr.country || undefined,
+          };
+        }
+      }
+    } catch {
+      // fall through to coordinates if present
     }
   }
 
@@ -750,8 +701,7 @@ async function resolveNominatimBounds(
     typeof coordinates.lng === 'number'
   ) {
     const { lat, lng } = coordinates;
-    const delta = 0.04;
-    const widerDelta = 0.10;
+    const delta = 0.035;
     let resolvedLocation = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
     let countryName: string | undefined;
     try {
@@ -781,7 +731,6 @@ async function resolveNominatimBounds(
       lat,
       lng,
       viewbox: `${lng - delta},${lat + delta},${lng + delta},${lat - delta}`,
-      widerViewbox: `${lng - widerDelta},${lat + widerDelta},${lng + widerDelta},${lat - widerDelta}`,
       resolvedLocation,
       countryName,
     };
@@ -795,27 +744,20 @@ async function queryNominatimPlaces(
   viewbox: string,
   limit = 10
 ): Promise<any[]> {
-  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&extratags=1&limit=${limit}&q=${encodeURIComponent(
-    query
-  )}&viewbox=${encodeURIComponent(viewbox)}&bounded=1`;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const resp = await fetch(url, {
-        headers: { 'User-Agent': 'MiekiszonAssistant/1.0' },
-        signal: AbortSignal.timeout(5000),
-      });
-      if ((resp.status === 429 || resp.status === 503) && attempt === 0) {
-        await new Promise((r) => setTimeout(r, 600));
-        continue;
-      }
-      if (!resp.ok) return [];
-      const data = await resp.json();
-      return Array.isArray(data) ? data : [];
-    } catch {
-      return [];
-    }
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&extratags=1&limit=${limit}&q=${encodeURIComponent(
+      query
+    )}&viewbox=${encodeURIComponent(viewbox)}&bounded=1`;
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'MiekiszonAssistant/1.0' },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
   }
-  return [];
 }
 
 async function searchFoodViaNominatim(params: {
@@ -829,46 +771,27 @@ async function searchFoodViaNominatim(params: {
   const bounds = await resolveNominatimBounds(
     params.cleanLocation,
     params.coordinates,
-    countryMeta.regionCode,
-    Boolean(countryMeta.inferredFiveDigit)
+    countryMeta.regionCode
   );
   if (!bounds) return null;
 
   let searchViewbox = bounds.viewbox;
   let postOffice: any = null;
-  let anchorLat = bounds.lat;
-  let anchorLng = bounds.lng;
 
   if (params.category === 'near_post') {
-    const centerPostBox = `${bounds.lng - 0.03},${bounds.lat + 0.03},${bounds.lng + 0.03},${bounds.lat - 0.03}`;
-    let posts = await queryNominatimPlaces('[amenity=post_office]', centerPostBox, 8);
-    if (posts.length === 0) {
-      posts = await queryNominatimPlaces('[amenity=post_office]', bounds.viewbox, 8);
-    }
-    if (posts.length === 0) {
-      posts = await queryNominatimPlaces('[amenity=post_office]', bounds.widerViewbox, 8);
-    }
-    const validPosts = posts
-      .filter((p) => Number.isFinite(Number(p?.lat)) && Number.isFinite(Number(p?.lon)))
-      .sort(
-        (a, b) =>
-          Math.hypot(Number(a.lat) - bounds.lat, Number(a.lon) - bounds.lng) -
-          Math.hypot(Number(b.lat) - bounds.lat, Number(b.lon) - bounds.lng)
-      );
-    const pickedPost = validPosts[0];
+    const posts = await queryNominatimPlaces('[amenity=post_office]', bounds.viewbox, 4);
+    const pickedPost = posts.find((p) => p?.lat && p?.lon);
     if (pickedPost) {
       const pAddr = pickedPost.address || {};
       const pLat = Number(pickedPost.lat);
       const pLng = Number(pickedPost.lon);
       if (Number.isFinite(pLat) && Number.isFinite(pLng)) {
-        anchorLat = pLat;
-        anchorLng = pLng;
-        const d = 0.02;
+        const d = 0.015;
         searchViewbox = `${pLng - d},${pLat + d},${pLng + d},${pLat - d}`;
       }
       const rawPc = pAddr.postcode || '';
       const postalCode =
-        pAddr.country_code === 'de' || params.isGerman || countryMeta.regionCode === 'DE'
+        pAddr.country_code === 'de' || params.isGerman
           ? stripHyphensForCodeOnly(rawPc)
           : rawPc;
       postOffice = {
@@ -883,91 +806,46 @@ async function searchFoodViaNominatim(params: {
 
   const queriesByCategory: Record<string, string[]> = {
     all: ['[amenity=restaurant]', '[amenity=fast_food]'],
-    doner: ['döner', 'kebab', '[amenity=fast_food]', '[amenity=restaurant]'],
+    doner: ['kebab', '[amenity=fast_food]', '[amenity=restaurant]'],
     pizza: ['pizzeria', 'pizza', '[amenity=restaurant]'],
-    chinese: ['china restaurant', 'asia imbiss', 'sushi', '[amenity=restaurant]'],
+    chinese: ['asia restaurant', '[amenity=restaurant]', '[amenity=fast_food]'],
     near_post: ['[amenity=restaurant]', '[amenity=fast_food]'],
   };
 
   const queryList = queriesByCategory[params.category] || queriesByCategory.all;
   const batches = await Promise.all(
-    queryList.map((q) => queryNominatimPlaces(q, searchViewbox, 10))
+    queryList.map((q) => queryNominatimPlaces(q, searchViewbox, 8))
   );
-  let flatRaw = batches.flat();
+  const flatRaw = batches.flat();
 
-  const collectCandidates = (rawItems: any[]) => {
-    const seen = new Set<string>();
-    const out: any[] = [];
-    for (const item of rawItems) {
-      const name = String(item?.name || item?.address?.amenity || '').trim();
-      if (!name) continue;
-      const isFood =
-        item?.category === 'amenity' &&
-        ['restaurant', 'fast_food', 'cafe', 'biergarten', 'pub', 'food_court'].includes(
-          String(item?.type || '')
-        );
-      if (!isFood) continue;
-      const road = String(item?.address?.road || '').trim();
-      const dedupKey = `${name.toLowerCase()}|${road.toLowerCase()}`;
-      if (seen.has(dedupKey)) continue;
-      seen.add(dedupKey);
-      out.push(item);
-    }
-    return out;
-  };
-
-  let candidates = collectCandidates(flatRaw);
-
-  const isCategoryMatch = (item: any): boolean => {
-    const text = `${item?.name || ''} ${item?.extratags?.cuisine || ''}`.toLowerCase();
-    if (params.category === 'doner') {
-      return /(kebab|döner|doner|kebap|turkish|falafel|shawarma|gyros)/.test(text);
-    }
-    if (params.category === 'pizza') {
-      return /(pizza|pizzeria|italian|pasta|trattoria|osteri)/.test(text);
-    }
-    if (params.category === 'chinese') {
-      return /(chin|asia|thai|viet|sushi|wok|noodle|ramen|bamboo|panda)/.test(text);
-    }
-    return false;
-  };
-
-  const directMatchCount =
-    params.category === 'doner' || params.category === 'pizza' || params.category === 'chinese'
-      ? candidates.filter(isCategoryMatch).length
-      : candidates.length;
-
-  // Expand to wider surrounding area (~10 km) if tight postal/city viewbox had too few results
-  if (candidates.length < 4 || directMatchCount < 2) {
-    const wideQueries =
-      params.category === 'doner'
-        ? ['döner', 'kebab', 'kebap']
-        : params.category === 'pizza'
-          ? ['pizzeria', 'pizza']
-          : params.category === 'chinese'
-            ? ['china restaurant', 'asia', 'sushi']
-            : ['[amenity=restaurant]', '[amenity=fast_food]'];
-    const wideBatches = await Promise.all(
-      wideQueries.map((q) => queryNominatimPlaces(q, bounds.widerViewbox, 10))
-    );
-    flatRaw = [...flatRaw, ...wideBatches.flat()];
-    candidates = collectCandidates(flatRaw);
+  const seen = new Set<string>();
+  const candidates: any[] = [];
+  for (const item of flatRaw) {
+    const name = String(item?.name || item?.address?.amenity || '').trim();
+    if (!name) continue;
+    const isFood =
+      item?.category === 'amenity' &&
+      ['restaurant', 'fast_food', 'cafe', 'biergarten', 'pub'].includes(String(item?.type || ''));
+    if (!isFood) continue;
+    const road = String(item?.address?.road || '').trim();
+    const dedupKey = `${name.toLowerCase()}|${road.toLowerCase()}`;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    candidates.push(item);
   }
 
   if (candidates.length === 0) return null;
 
   const scoreItem = (item: any): number => {
-    let score = 0;
-    if (isCategoryMatch(item)) score += 100;
-    if (item?.extratags?.phone || item?.extratags?.['contact:phone']) score += 8;
-    if (item?.extratags?.opening_hours) score += 4;
-    const iLat = Number(item?.lat);
-    const iLng = Number(item?.lon);
-    if (Number.isFinite(iLat) && Number.isFinite(iLng)) {
-      const distDeg = Math.hypot(iLat - anchorLat, iLng - anchorLng);
-      score -= Math.min(distDeg * 120, 12);
+    const text = `${item?.name || ''} ${item?.extratags?.cuisine || ''}`.toLowerCase();
+    if (params.category === 'doner') {
+      if (/(kebab|döner|doner|kebap|turkish|falafel|shawarma|gyros)/.test(text)) return 3;
+    } else if (params.category === 'pizza') {
+      if (/(pizza|pizzeria|italian|pasta|trattoria|osteri)/.test(text)) return 3;
+    } else if (params.category === 'chinese') {
+      if (/(chin|asia|thai|viet|sushi|wok|noodle|ramen|bamboo|panda)/.test(text)) return 3;
     }
-    return score;
+    return item?.extratags?.phone || item?.extratags?.['contact:phone'] ? 1 : 0;
   };
 
   candidates.sort((a, b) => scoreItem(b) - scoreItem(a));
@@ -980,7 +858,7 @@ async function searchFoodViaNominatim(params: {
     const city = addr.city || addr.town || addr.village || addr.municipality || bounds.resolvedLocation;
     const rawPc = String(addr.postcode || '');
     const postalCode =
-      addr.country_code === 'de' || params.isGerman || countryMeta.regionCode === 'DE'
+      addr.country_code === 'de' || params.isGerman
         ? stripHyphensForCodeOnly(rawPc)
         : rawPc;
     const cuisineRaw = String(extras.cuisine || '').replace(/;/g, ', ');
@@ -1037,7 +915,7 @@ async function searchFoodViaNominatim(params: {
 
   return {
     validGermany: true,
-    resolvedLocation: bounds.resolvedLocation || params.cleanLocation,
+    resolvedLocation: params.cleanLocation || bounds.resolvedLocation,
     postOffice,
     results,
     groundingLinks: results.slice(0, 6).map((r) => ({
@@ -1048,92 +926,15 @@ async function searchFoodViaNominatim(params: {
   };
 }
 
-function estimateStayNightPriceEur(params: {
-  name: string;
-  stayType: 'all' | 'rooms' | 'hotel' | 'apartment' | 'budget' | 'other';
-  priceLevel?: string;
-  rating?: number | null;
-  guests?: number;
-  minPriceEur?: number | null;
-  maxPriceEur?: number | null;
-}): { approxPriceEur: string; priceNumericEur: number } {
-  const lower = (params.name || '').toLowerCase();
-  let hash = 0;
-  for (let i = 0; i < lower.length; i += 1) {
-    hash = (hash * 31 + lower.charCodeAt(i)) >>> 0;
-  }
-
-  let minRange = 52;
-  let maxRange = 108;
-
-  if (params.priceLevel === 'PRICE_LEVEL_FREE' || params.priceLevel === 'PRICE_LEVEL_INEXPENSIVE') {
-    minRange = 42;
-    maxRange = 59;
-  } else if (params.priceLevel === 'PRICE_LEVEL_MODERATE') {
-    minRange = 72;
-    maxRange = 114;
-  } else if (params.priceLevel === 'PRICE_LEVEL_EXPENSIVE') {
-    minRange = 128;
-    maxRange = 175;
-  } else if (params.priceLevel === 'PRICE_LEVEL_VERY_EXPENSIVE') {
-    minRange = 190;
-    maxRange = 260;
-  } else if (/(hostel|jugendherberge|a&o|meininger|b&b|motel|budget)/.test(lower) || params.stayType === 'budget') {
-    minRange = 39;
-    maxRange = 64;
-  } else if (/(zimmer|monteur|pension|gästehaus|guest|pokoje|nocleg|kwatera)/.test(lower) || params.stayType === 'rooms') {
-    minRange = 46;
-    maxRange = 86;
-  } else if (/(apart|loft|studio|suite|ferienwohnung|fewo|living)/.test(lower) || params.stayType === 'apartment') {
-    minRange = 68;
-    maxRange = 128;
-  } else if (/(grand|luxury|hilton|marriott|kempinski|adlon|sofitel|radisson|hyatt|palace)/.test(lower)) {
-    minRange = 135;
-    maxRange = 225;
-  } else if (params.stayType === 'hotel') {
-    minRange = 68;
-    maxRange = 148;
-  }
-
-  let price = minRange + (hash % Math.max(1, maxRange - minRange + 1));
-
-  if (typeof params.rating === 'number') {
-    if (params.rating >= 4.6) price += 10;
-    else if (params.rating > 0 && params.rating < 3.9) price = Math.max(36, price - 8);
-  }
-  if (typeof params.guests === 'number' && params.guests > 2) {
-    price += Math.min(40, (params.guests - 2) * 12);
-  }
-
-  if (typeof params.maxPriceEur === 'number' && params.maxPriceEur > 0 && price > params.maxPriceEur) {
-    const lowCap = Math.max(30, Math.round(params.maxPriceEur * 0.65));
-    const span = Math.max(1, params.maxPriceEur - lowCap);
-    price = lowCap + (hash % span);
-  }
-  if (typeof params.minPriceEur === 'number' && params.minPriceEur > 0 && price < params.minPriceEur) {
-    const highCap = params.maxPriceEur && params.maxPriceEur > params.minPriceEur ? params.maxPriceEur : params.minPriceEur + 35;
-    const span = Math.max(1, highCap - params.minPriceEur);
-    price = params.minPriceEur + (hash % span);
-  }
-
-  const finalPrice = Math.max(29, Math.round(price));
-  return {
-    priceNumericEur: finalPrice,
-    approxPriceEur: `ok. ${finalPrice} € / noc`,
-  };
-}
-
 async function searchStaysViaNominatim(params: {
   cleanLocation: string;
   coordinates?: { lat: number; lng: number };
-  stayType: 'all' | 'rooms' | 'hotel' | 'apartment' | 'budget';
+  stayType: 'all' | 'hotel' | 'apartment' | 'budget';
   safeCheckIn: string;
   safeCheckOut: string;
   safeGuests: number;
   isGerman: boolean;
   country?: string;
-  minPriceEur?: number | null;
-  maxPriceEur?: number | null;
 }): Promise<any | null> {
   const countryMeta = resolveCountryMeta(params.cleanLocation, params.country);
   const bounds = await resolveNominatimBounds(
@@ -1145,7 +946,6 @@ async function searchStaysViaNominatim(params: {
 
   const queriesByType: Record<string, string[]> = {
     all: ['[tourism=hotel]', '[tourism=guest_house]', '[tourism=hostel]', '[tourism=apartment]'],
-    rooms: ['[tourism=guest_house]', '[tourism=hostel]', '[tourism=apartment]', '[tourism=hotel]'],
     hotel: ['[tourism=hotel]'],
     apartment: ['[tourism=apartment]', '[tourism=guest_house]'],
     budget: ['[tourism=hostel]', '[tourism=guest_house]', '[tourism=hotel]'],
@@ -1181,15 +981,13 @@ async function searchStaysViaNominatim(params: {
         ? stripHyphensForCodeOnly(rawPc)
         : rawPc;
     const rawType = String(item.type || '');
-    const mappedStayType: 'hotel' | 'apartment' | 'budget' | 'rooms' | 'other' =
+    const mappedStayType: 'hotel' | 'apartment' | 'budget' | 'other' =
       rawType === 'hotel'
         ? 'hotel'
         : rawType === 'apartment'
           ? 'apartment'
           : rawType === 'hostel' || rawType === 'guest_house'
-            ? params.stayType === 'rooms'
-              ? 'rooms'
-              : 'budget'
+            ? 'budget'
             : 'other';
 
     const stayTypeLabel =
@@ -1197,19 +995,9 @@ async function searchStaysViaNominatim(params: {
         ? 'Hotel'
         : mappedStayType === 'apartment'
           ? 'Apartament'
-          : mappedStayType === 'rooms'
-            ? 'Pokoje / Pensjonat'
-            : mappedStayType === 'budget'
-              ? 'Hostel / Pensjonat'
-              : 'Nocleg';
-
-    const priceInfo = estimateStayNightPriceEur({
-      name,
-      stayType: mappedStayType,
-      guests: params.safeGuests,
-      minPriceEur: params.minPriceEur,
-      maxPriceEur: params.maxPriceEur,
-    });
+          : mappedStayType === 'budget'
+            ? 'Hostel / Pensjonat'
+            : 'Nocleg';
 
     const fullAddr = `${street || item.display_name}${postalCode ? `, ${postalCode}` : ''} ${city}`.trim();
     return {
@@ -1222,8 +1010,7 @@ async function searchStaysViaNominatim(params: {
       city,
       phone: extras.phone || extras['contact:phone'] || null,
       rating: null,
-      approxPriceEur: priceInfo.approxPriceEur,
-      priceNumericEur: priceInfo.priceNumericEur,
+      approxPriceEur: 'Sprawdź w portalu',
       distanceInfo: 'W pobliżu lokalizacji',
       highlight: `${stayTypeLabel} na termin ${params.safeCheckIn} – ${params.safeCheckOut} (${params.safeGuests} os.).`,
       bookingUrl: buildBookingUrl(
@@ -1232,16 +1019,14 @@ async function searchStaysViaNominatim(params: {
         params.safeCheckIn,
         params.safeCheckOut,
         params.safeGuests,
-        fallbackCountry,
-        params.maxPriceEur
+        fallbackCountry
       ),
       airbnbUrl: buildAirbnbUrl(
         city,
         params.safeCheckIn,
         params.safeCheckOut,
         params.safeGuests,
-        fallbackCountry,
-        params.maxPriceEur
+        fallbackCountry
       ),
       hrsUrl: buildHrsUrl(
         name,
@@ -1602,34 +1387,16 @@ async function searchTransitViaOpenSources(params: {
   };
 }
 
-export function createApiApp() {
+async function startServer() {
   const app = express();
   app.set('trust proxy', 1);
+  app.use(express.json({ limit: '12mb' }));
 
-  const jsonParser = express.json({ limit: '12mb' });
-  app.use((req, res, next) => {
-    if (
-      (req as any)._body ||
-      (req.body !== undefined && req.method !== 'GET' && req.method !== 'HEAD')
-    ) {
-      return next();
-    }
-    return jsonParser(req, res, next);
-  });
-
-  app.use('/api', (_req, res, next) => {
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    next();
-  });
-
-  const isVercel = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
   const distDir = path.resolve(__dirname, 'dist');
   const distIndexPath = path.join(distDir, 'index.html');
   const isDevLifecycle =
     process.env.npm_lifecycle_event === 'dev' || process.env.NODE_ENV === 'development';
   const useStaticDist =
-    isVercel ||
     process.env.NODE_ENV === 'production' ||
     process.env.SERVE_STATIC === 'true' ||
     (!isDevLifecycle && fs.existsSync(distIndexPath));
@@ -1640,24 +1407,13 @@ export function createApiApp() {
   const healthHandler = (_req: express.Request, res: express.Response) => {
     res.json({
       status: 'ok',
-      platform: isVercel ? 'vercel' : 'node',
       mode: useStaticDist ? 'production' : 'development',
-      liveWebsocket: !isVercel,
-      voiceHttpFallback: true,
       uptimeSeconds: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
     });
   };
   app.get('/api/health', healthHandler);
   app.get('/healthz', healthHandler);
-
-  app.get('/api/live', (_req, res) => {
-    res.status(426).json({
-      error: 'WebSocket live upgrade unavailable over plain HTTP; use HTTP voice fallback.',
-      liveWebsocket: false,
-      voiceHttpFallback: true,
-    });
-  });
 
   app.get('/api/config/maps', (_req, res) => {
     res.json({ apiKey: getValidMapsApiKey() });
@@ -1683,9 +1439,6 @@ export function createApiApp() {
       const isGerman = detectGermanContext(rawCombined, country);
       const hasCoords =
         typeof coordinates?.lat === 'number' && typeof coordinates?.lng === 'number';
-      // When user explicitly typed a city or postal code, don't let old GPS coords override it
-      const useCoordsOnly = hasCoords && !cleanLocation;
-      const effectiveCoords = useCoordsOnly ? coordinates : undefined;
 
       if (!cleanLocation && !hasCoords) {
         return res.status(400).json({
@@ -1695,7 +1448,7 @@ export function createApiApp() {
       }
 
       const cacheKey = `food|${category}|${cleanLocation.toLowerCase()}|${
-        useCoordsOnly ? `${coordinates!.lat.toFixed(2)},${coordinates!.lng.toFixed(2)}` : ''
+        hasCoords ? `${coordinates!.lat.toFixed(2)},${coordinates!.lng.toFixed(2)}` : ''
       }`;
       const cached = getCachedPayload<any>(cacheKey);
       if (cached) {
@@ -1717,7 +1470,7 @@ export function createApiApp() {
         try {
           const countryMeta = resolveCountryMeta(cleanLocation, country);
           const placesLocationText = formatPlacesLocationQuery(cleanLocation, countryMeta);
-          const biasCoords = useCoordsOnly
+          const biasCoords = hasCoords
             ? coordinates!
             : await resolvePostalBiasCoords(placesLocationText, countryMeta.regionCode, mapsApiKey);
 
@@ -1896,12 +1649,12 @@ Podaj 5-6 realnych miejsc.`;
       const mapsConfig: any = {
         tools: [{ googleMaps: {} }],
       };
-      if (effectiveCoords) {
+      if (hasCoords) {
         mapsConfig.toolConfig = {
           retrievalConfig: {
             latLng: {
-              latitude: effectiveCoords.lat,
-              longitude: effectiveCoords.lng,
+              latitude: coordinates!.lat,
+              longitude: coordinates!.lng,
             },
           },
         };
@@ -1959,7 +1712,7 @@ Podaj 5-6 realnych miejsc.`;
       if (!searchText && !mapsText) {
         const osmPayload = await searchFoodViaNominatim({
           cleanLocation,
-          coordinates: effectiveCoords,
+          coordinates: hasCoords ? coordinates : undefined,
           category,
           isGerman,
           country,
@@ -2062,7 +1815,7 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
         if (isQuotaOrRateError(structureErr)) {
           const osmPayload = await searchFoodViaNominatim({
             cleanLocation,
-            coordinates: effectiveCoords,
+            coordinates: hasCoords ? coordinates : undefined,
             category,
             isGerman,
             country,
@@ -2100,18 +1853,14 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
         checkIn,
         checkOut,
         guests = 2,
-        minPriceEur = null,
-        maxPriceEur = null,
         coordinates,
       } = req.body as {
         location?: string;
         country?: string;
-        stayType?: 'all' | 'rooms' | 'hotel' | 'apartment' | 'budget';
+        stayType?: 'all' | 'hotel' | 'apartment' | 'budget';
         checkIn?: string;
         checkOut?: string;
         guests?: number;
-        minPriceEur?: number | null;
-        maxPriceEur?: number | null;
         coordinates?: { lat: number; lng: number };
       };
 
@@ -2135,18 +1884,8 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
         checkOut
       );
       const safeGuests = Math.max(1, Math.min(10, Number(guests) || 2));
-      const safeMinPrice =
-        typeof minPriceEur === 'number' && Number.isFinite(minPriceEur) && minPriceEur > 0
-          ? Math.round(minPriceEur)
-          : null;
-      const safeMaxPrice =
-        typeof maxPriceEur === 'number' && Number.isFinite(maxPriceEur) && maxPriceEur > 0
-          ? Math.round(maxPriceEur)
-          : null;
 
-      const cacheKey = `stays|${stayType}|${safeCheckIn}|${safeCheckOut}|${safeGuests}|${
-        safeMinPrice ?? ''
-      }-${safeMaxPrice ?? ''}|${cleanLocation.toLowerCase()}|${
+      const cacheKey = `stays|${stayType}|${safeCheckIn}|${safeCheckOut}|${safeGuests}|${cleanLocation.toLowerCase()}|${
         hasCoords ? `${coordinates!.lat.toFixed(2)},${coordinates!.lng.toFixed(2)}` : ''
       }`;
       const cached = getCachedPayload<any>(cacheKey);
@@ -2154,23 +1893,7 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
         return res.json(cached);
       }
 
-      const mapPlacesPriceLevelToEur = (
-        name: string,
-        priceLevel?: string,
-        rating?: number | null
-      ): { approxPriceEur: string; priceNumericEur: number } =>
-        estimateStayNightPriceEur({
-          name,
-          stayType,
-          priceLevel,
-          rating,
-          guests: safeGuests,
-          minPriceEur: safeMinPrice,
-          maxPriceEur: safeMaxPrice,
-        });
-
-      // Fast Google Places REST primary path when Maps API key is available (also acts as zero-429 backup)
-      let placesBackupPayload: any = null;
+      // Fast Google Places REST primary path (~250ms) when Maps API key is available
       const mapsApiKey = getValidMapsApiKey();
       if (mapsApiKey) {
         try {
@@ -2182,7 +1905,6 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
 
           const staysQueryPrefix: Record<string, string> = {
             all: 'Hotel Apartment Pension Zimmer',
-            rooms: 'Privatzimmer Monteurzimmer Zimmervermietung Guest Room Pension',
             hotel: 'Hotel',
             apartment: 'Apartment Ferienwohnung',
             budget: 'Hostel B&B Guest House Pension',
@@ -2193,7 +1915,7 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
               : staysQueryPrefix[stayType] || 'Hotel Lodging',
             includedType: 'lodging',
             languageCode: 'pl',
-            maxResultCount: 8,
+            maxResultCount: 6,
           };
           if (countryMeta.regionCode) {
             placesBody.regionCode = countryMeta.regionCode;
@@ -2216,7 +1938,7 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
               'Content-Type': 'application/json',
               'X-Goog-Api-Key': mapsApiKey,
               'X-Goog-FieldMask':
-                'places.id,places.displayName,places.formattedAddress,places.addressComponents,places.nationalPhoneNumber,places.internationalPhoneNumber,places.rating,places.priceLevel,places.googleMapsUri,places.primaryTypeDisplayName',
+                'places.id,places.displayName,places.formattedAddress,places.addressComponents,places.nationalPhoneNumber,places.internationalPhoneNumber,places.rating,places.googleMapsUri,places.primaryTypeDisplayName',
             },
             body: JSON.stringify(placesBody),
           });
@@ -2245,20 +1967,17 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
                   countryMeta.countryName ||
                   country ||
                   '';
-                const ratingVal = typeof p?.rating === 'number' ? p.rating : null;
-                const priceInfo = mapPlacesPriceLevelToEur(name, p?.priceLevel, ratingVal);
                 return {
                   id: p.id || `stay_${idx}`,
                   name,
                   stayType: stayType === 'all' ? 'hotel' : stayType,
-                  stayTypeLabel: p?.primaryTypeDisplayName?.text || 'Pokój / Nocleg',
+                  stayTypeLabel: p?.primaryTypeDisplayName?.text || 'Hotel / Pokoje',
                   address: formatted,
                   postalCode: postal,
                   city: cityComp,
                   phone: p?.internationalPhoneNumber || p?.nationalPhoneNumber || null,
-                  rating: ratingVal,
-                  approxPriceEur: priceInfo.approxPriceEur,
-                  priceNumericEur: priceInfo.priceNumericEur,
+                  rating: typeof p?.rating === 'number' ? p.rating : null,
+                  approxPriceEur: 'Sprawdź w portalu',
                   distanceInfo: 'W pobliżu',
                   highlight: `Wynajem pokoju na termin ${safeCheckIn} – ${safeCheckOut} (${safeGuests} os.).`,
                   bookingUrl: buildBookingUrl(
@@ -2267,16 +1986,14 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
                     safeCheckIn,
                     safeCheckOut,
                     safeGuests,
-                    countryNameComp,
-                    safeMaxPrice
+                    countryNameComp
                   ),
                   airbnbUrl: buildAirbnbUrl(
                     cityComp,
                     safeCheckIn,
                     safeCheckOut,
                     safeGuests,
-                    countryNameComp,
-                    safeMaxPrice
+                    countryNameComp
                   ),
                   hrsUrl: buildHrsUrl(
                     name,
@@ -2308,19 +2025,18 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
                     )}`,
                 };
               });
-              placesBackupPayload = {
+              const payload = {
                 validGermany: true,
                 resolvedLocation: cleanLocation || mapped[0]?.city || 'Lokalizacja GPS',
                 results: mapped,
-                groundingLinks: [],
+                groundingLinks: mapped.slice(0, 6).map((m) => ({
+                  title: m.name,
+                  url: m.mapsUrl,
+                  source: 'maps' as const,
+                })),
               };
-              const hasRealPricedPlaces = mapped.some(
-                (m) => typeof m.priceNumericEur === 'number' && m.priceNumericEur > 0
-              );
-              if (hasRealPricedPlaces && stayType !== 'rooms' && !safeMinPrice && !safeMaxPrice) {
-                setCachedPayload(cacheKey, placesBackupPayload);
-                return res.json(placesBackupPayload);
-              }
+              setCachedPayload(cacheKey, payload);
+              return res.json(payload);
             }
           }
         } catch (placesErr) {
@@ -2331,19 +2047,11 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
       const ai = getAiClient();
 
       const stayTypeDesc: Record<string, string> = {
-        all: 'najlepsze noclegi i pokoje do wynajęcia (pokoje gościnne Privatzimmer / Monteurzimmer, hotele, apartamenty) dostępne na Booking.com, Airbnb, HRS, FeWo-direkt i Expedia',
-        rooms: 'realne pokoje do wynajęcia na doby i krótkie pobyty (Privatzimmer, Monteurzimmer, pokoje gościnne, pensjonaty, tanie pokoje hotelowe) na Booking.com, Airbnb, Monteurzimmer.de, HRS',
+        all: 'najlepsze noclegi i pokoje do wynajęcia (hotele, apartamenty, pokoje gościnne Privatzimmer / Monteurzimmer / Ferienwohnung) dostępne na Booking.com, Airbnb, HRS, FeWo-direkt i Expedia',
         hotel: 'najlepsze hotele z rezerwacją pokoi (Booking.com, HRS, Expedia)',
         apartment: 'najlepsze apartamenty, pokoje i mieszkania wakacyjne (Airbnb, FeWo-direkt, Booking.com)',
         budget: 'dobre i przystępne cenowo pokoje do wynajęcia i noclegi budżetowe (hostele, B&B, pokoje, pensjonaty na Booking.com i Airbnb)',
       };
-
-      const priceRangeInstruction =
-        safeMinPrice || safeMaxPrice
-          ? `BUDŻET / FILTR CENOWY: Użytkownik szuka pokoi i noclegów w cenie ${
-              safeMinPrice ? `od ${safeMinPrice} EUR ` : ''
-            }${safeMaxPrice ? `do ${safeMaxPrice} EUR ` : ''}za noc. Dopasuj oferty do tego przedziału cenowego i podaj dokładną orientacyjną cenę liczbową za noc w EUR.`
-          : 'Podaj orientacyjną cenę liczbową za pokój/noc w EUR (np. 55, 85, 130) w polu priceNumericEur oraz opisowo w approxPriceEur (np. "65 EUR / noc").';
 
       const locLabel = cleanLocation
         ? `"${cleanLocation}"`
@@ -2354,10 +2062,9 @@ Termin pobytu: od ${safeCheckIn} do ${safeCheckOut} dla ${safeGuests} osób.
 Obsługujesz dowolny kraj na świecie po kodzie pocztowym, mieście lub współrzędnych (Niemcy, Polska, Austria, Czechy, Francja, Włochy itd.).
 ${isGerman ? 'WAŻNE: Dla Niemiec podawaj kod pocztowy ZAWSZE bez myślników (np. 10115).' : ''}
 Wyszukaj realne, istniejące obiekty oferujące wynajem pokoi i noclegów: ${stayTypeDesc[stayType] || stayTypeDesc.all}.
-${priceRangeInstruction}
-Dla 6-8 obiektów (zróżnicowanych cenowo lub dopasowanych do budżetu) podaj:
+Dla 5-6 obiektów podaj:
 - nazwę obiektu
-- typ (rooms / hotel / apartment / budget)
+- typ (hotel / apartment / budget)
 - pełny adres wraz z kodem pocztowym, miastem i krajem
 - prawdziwy numer telefonu z prefiksem kraju jeśli dostępny
 - ocenę i orientacyjną cenę za pokój/noc w EUR w wybranym terminie
@@ -2365,15 +2072,13 @@ Dla 6-8 obiektów (zróżnicowanych cenowo lub dopasowanych do budżetu) podaj:
 - krótki opis po polsku (np. rodzaj pokoju, meldunek, dostępność w Booking/Airbnb/HRS).`;
 
       const mapsPrompt = `Find top rated ${
-        stayType === 'rooms'
-          ? 'guest rooms, private rooms, pensions and affordable accommodations'
-          : stayType === 'hotel'
-            ? 'hotels and rooms'
-            : stayType === 'apartment'
-              ? 'holiday apartments, rooms and Airbnb-style stays'
-              : stayType === 'budget'
-                ? 'budget hotels, guest rooms and hostels'
-                : 'hotels, guest rooms, apartments and accommodations'
+        stayType === 'hotel'
+          ? 'hotels and rooms'
+          : stayType === 'apartment'
+            ? 'holiday apartments, rooms and Airbnb-style stays'
+            : stayType === 'budget'
+              ? 'budget hotels, guest rooms and hostels'
+              : 'hotels, guest rooms, apartments and accommodations'
       } ${cleanLocation ? `in ${cleanLocation}` : 'nearby'}.`;
 
       const mapsConfig: any = {
@@ -2433,16 +2138,12 @@ Dla 6-8 obiektów (zróżnicowanych cenowo lub dopasowanych do budżetu) podaj:
             searchText = liteRes.text ?? '';
             groundingLinks.push(...extractGroundingLinks(liteRes));
           } catch {
-            // Fall through to Places / Nominatim backup
+            // Fall through to Nominatim stays fallback
           }
         }
       }
 
       if (!searchText && !mapsText) {
-        if (placesBackupPayload) {
-          setCachedPayload(cacheKey, placesBackupPayload);
-          return res.json(placesBackupPayload);
-        }
         const osmStaysPayload = await searchStaysViaNominatim({
           cleanLocation,
           coordinates: hasCoords ? coordinates : undefined,
@@ -2452,8 +2153,6 @@ Dla 6-8 obiektów (zróżnicowanych cenowo lub dopasowanych do budżetu) podaj:
           safeGuests,
           isGerman,
           country,
-          minPriceEur: safeMinPrice,
-          maxPriceEur: safeMaxPrice,
         });
         if (osmStaysPayload && osmStaysPayload.results.length > 0) {
           setCachedPayload(cacheKey, osmStaysPayload);
@@ -2474,7 +2173,6 @@ Dla 6-8 obiektów (zróżnicowanych cenowo lub dopasowanych do budżetu) podaj:
 Zawsze ustaw validGermany = true (obsługujemy dowolny kraj po kodzie pocztowym lub lokalizacji).
 Jeśli lokalizacja jest w Niemczech, kod pocztowy w "postalCode" musi być bez myślników (np. 10115).
 Nigdy nie wymyślaj numerów telefonów (ustaw null jeśli brak w źródle).
-W polu "priceNumericEur" podaj samą liczbę całkowitą orientacyjnej ceny za 1 noc w EUR (np. 55, 89, 130) jeśli znana, lub null jeśli brak ceny. W polu "approxPriceEur" podaj czytelny zapis (np. "65 EUR / noc").
 
 DANE Z GOOGLE SEARCH:
 ${searchText}
@@ -2502,7 +2200,7 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
                       name: { type: Type.STRING },
                       stayType: {
                         type: Type.STRING,
-                        description: 'One of: rooms, hotel, apartment, budget, other',
+                        description: 'One of: hotel, apartment, budget, other',
                       },
                       stayTypeLabel: { type: Type.STRING },
                       address: { type: Type.STRING },
@@ -2511,7 +2209,6 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
                       phone: { type: Type.STRING, nullable: true },
                       rating: { type: Type.NUMBER, nullable: true },
                       approxPriceEur: { type: Type.STRING },
-                      priceNumericEur: { type: Type.NUMBER, nullable: true },
                       distanceInfo: { type: Type.STRING },
                       highlight: { type: Type.STRING },
                       mapsUrl: { type: Type.STRING },
@@ -2529,47 +2226,22 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
           resolveCountryMeta(cleanLocation, country).countryName || country || '';
         const enrichedResults = (parsed.results || []).map((item: any) => {
           const targetCity = item.city || cleanLocation || 'Europe';
-          let numericPrice =
-            typeof item.priceNumericEur === 'number' && Number.isFinite(item.priceNumericEur)
-              ? Math.round(item.priceNumericEur)
-              : null;
-          if (!numericPrice && item.approxPriceEur) {
-            const m = String(item.approxPriceEur).match(/(\d{2,4})/);
-            if (m) numericPrice = Number.parseInt(m[1], 10);
-          }
-          const fallbackEstimate = estimateStayNightPriceEur({
-            name: String(item.name || 'Nocleg'),
-            stayType: (item.stayType || stayType) as any,
-            rating: typeof item.rating === 'number' ? item.rating : null,
-            guests: safeGuests,
-            minPriceEur: safeMinPrice,
-            maxPriceEur: safeMaxPrice,
-          });
-          const resolvedPrice = numericPrice ?? fallbackEstimate.priceNumericEur;
-          const resolvedApprox =
-            numericPrice && item.approxPriceEur && !/sprawdź/i.test(String(item.approxPriceEur))
-              ? String(item.approxPriceEur)
-              : `ok. ${resolvedPrice} € / noc`;
           return {
             ...item,
-            priceNumericEur: resolvedPrice,
-            approxPriceEur: resolvedApprox,
             bookingUrl: buildBookingUrl(
               item.name,
               targetCity,
               safeCheckIn,
               safeCheckOut,
               safeGuests,
-              fallbackCountry,
-              safeMaxPrice
+              fallbackCountry
             ),
             airbnbUrl: buildAirbnbUrl(
               targetCity,
               safeCheckIn,
               safeCheckOut,
               safeGuests,
-              fallbackCountry,
-              safeMaxPrice
+              fallbackCountry
             ),
             hrsUrl: buildHrsUrl(
               item.name,
@@ -2606,15 +2278,11 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
           ...parsed,
           validGermany: true,
           results: enrichedResults,
-          groundingLinks: [],
+          groundingLinks: groundingLinks.slice(0, 12),
         };
         setCachedPayload(cacheKey, payload);
         res.json(payload);
       } catch (structureErr: any) {
-        if (placesBackupPayload) {
-          setCachedPayload(cacheKey, placesBackupPayload);
-          return res.json(placesBackupPayload);
-        }
         if (isQuotaOrRateError(structureErr)) {
           const osmStaysPayload = await searchStaysViaNominatim({
             cleanLocation,
@@ -2625,8 +2293,6 @@ ${JSON.stringify(groundingLinks.filter((l) => l.source === 'maps').slice(0, 10))
             safeGuests,
             isGerman,
             country,
-            minPriceEur: safeMinPrice,
-            maxPriceEur: safeMaxPrice,
           });
           if (osmStaysPayload && osmStaysPayload.results.length > 0) {
             setCachedPayload(cacheKey, osmStaysPayload);
@@ -4008,20 +3674,6 @@ Zasady:
         return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
       };
 
-      // 0ms fast-path: Step back window / browser page / modal (single command only)
-      if (
-        /^(?:prosz[ęe]\s+)?(?:cofnij(?:\s+(?:okno|stron[ęe]|widok|kart[ęe]|krok))?|wr[óo][ćc]\s+(?:do\s+poprzedniego\s+(?:okna|widoku|ekranu)|krok\s+wstecz)|krok\s+wstecz|wstecz|step\s+back|go\s+back|zurück(?:\s+(?:im\s+fenster|zum\s+vorherigen\s+fenster|schritt))?|fenster\s+zurück)[.!?]*$/i.test(
-          cleanTranscript
-        )
-      ) {
-        return res.json({
-          replyText: isDeLang
-            ? 'Ich gehe einen Schritt zurück.'
-            : 'Cofam okno o jeden krok.',
-          actions: [{ type: 'go_back', steps: 1 }],
-        });
-      }
-
       // 0ms fast-path: Close browser (and optionally wait for further commands)
       if (
         /^(?:prosz[ęe]\s+)?(?:zamknij|wy[łl][ąa]cz|zatrzymaj|zako[ńn]cz|schlie[ßs]e|beende|stoppe)\s+(?:t[ęą]\s+|aplikacj[ęe]\s+|okno\s+)?(?:przegl[ąa]dark[ęei]|google\s+chrome|chrome|browser)(?:\s*(?:,|i|oraz|und)?\s*(?:poczekaj|czekaj|zaczekaj|warte)(?:\s+na\s+(?:inne|kolejne|dalsze|nowe)\s+(?:poleceni[ea]|komend[ey]|rozkazy))?)?[.!?]*$/i.test(
@@ -4520,9 +4172,7 @@ Zasady:
       const targetLangName = language === 'de' ? 'niemieckim (Deutsch)' : 'polskim';
       const personaDesc = language === 'de' ? voiceCfg.personaDe : voiceCfg.personaPl;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-lite',
-        contents: `Polecenie użytkownika (po polsku lub niemiecku): "${cleanTranscript}"
+      const commandPrompt = `Polecenie użytkownika (po polsku lub niemiecku): "${cleanTranscript}"
 ${codeOnly ? 'TRYB KODU BEZ MYŚLNIKÓW AKTYWNY: Traktuj wpis jako kod bez myślników i użyj web_search z codeOnly=true lub dopasuj lokalizację/kod.' : ''}
 
 Stan UI:
@@ -4536,135 +4186,160 @@ Stan UI:
 ZASADY KLUCZOWE:
 1. OBSŁUGUJESZ WYSZUKIWANIE JEDZENIA, NOCLEGÓW I PRZEJAZDÓW W DOWOLNYM KRAJU NA ŚWIECIE po kodzie pocztowym lub mieście (Polska 00-001, Niemcy 10115, Francja 75001, Czechy, Austria, UK itd.).
 2. KOD POCZTOWY W NIEMCZECH: Jeśli użytkownik mówi, że kod pocztowy jest w Niemczech (np. "w Niemczech", "Deutschland", "DE", "PLZ"), ZAWSZE usuń z niego wszystkie myślniki (np. 10-115 -> 10115) w polu "location"/"from"/"to"/"query" i ustaw country: "DE". Dla innych krajów zachowaj naturalny format kodu (np. "00-001" i country: "PL").
-3. PEŁNE UPRAWNIENIA SYSTEMOWE ASYSTENTA: Masz pełną zgodę i uprawnienia systemowe na wykonywanie WSZYSTKICH poleceń użytkownika bez pytania o potwierdzenie, w tym:
-   - otwieranie przeglądarki (open_browser), wyszukiwanie stron i artykułów (open_browser z query lub web_search), otwieranie i czytanie wybranego artykułu (select_article / close_article),
-   - zamykanie przeglądarki na żądanie użytkownika (close_browser),
-   - cofanie aktywnego okna / zakładki / strony w przeglądarce (go_back, opcjonalnie z liczbą kroków "steps"),
-   - jednoczesne wykonywanie wielu poleceń z jednej wypowiedzi (zwróć kolejno wszystkie akcje w tablicy "actions", np. najpierw close_browser, potem go_back, a na końcu open_youtube / open_calculator / search_food / open_app / prepare_whatsapp itd.!).
-4. ZAMYKANIE I POWRÓT Z ZAKŁADKI LUB OKNA: Jeśli użytkownik chce cofnąć okno/stronę/widok bez podawania konkretnej nowej zakładki, użyj "go_back". Jeśli zamyka zakładkę i przechodzi do innej konkretnej zakładki, użyj "close_tab" (z "targetTab": "assistant" | "food" | "stays" | "transit" | "tools") lub "navigate" z explicit=true.
+3. PEŁNE UPRAWNIENIA DO APLIKACJI TELEFONU I PRZEGLĄDARKI: Masz pełną zgodę i uprawnienia na włączanie przeglądarki (open_browser), wyszukiwanie danych artykułów i stron (open_browser z query lub web_search), otwieranie i czytanie wybranego artykułu (select_article / close_article), wyłączanie przeglądarki podczas rozmowy głosowej (close_browser), uruchamianie Google Chrome (open_browser z openExternalChrome=true lub app="chrome"), YouTube / YouTube Music, kalkulatora oraz notatnika.
+4. ZAMYKANIE I POWRÓT Z ZAKŁADKI (np. z Jedzenia): Jeśli użytkownik chce wrócić, zamknąć zakładkę (np. jedzenie) lub przejść do innej zakładki podanej przez niego, użyj "close_tab" (z opcjonalnym "targetTab": "assistant" | "food" | "stays" | "transit") lub "navigate" z explicit=true.
 5. WYNIKI W AKTYWNYM OKNIE: Jeśli "aktywna zakładka" to "food", "stays" lub "transit" i szukasz czegoś przez "web_search" lub "open_browser", NIGDY nie zwracaj akcji navigate(tab: "assistant") — przeglądarka i wyniki zostaną wyświetlone bezpośrednio w aktualnie otwartym oknie!
 6. YOUTUBE, AKTOR / WYKONAWCA I WYŁĄCZANIE: Gdy użytkownik prosi o otwarcie YouTube dla podanego aktora/wykonawcy lub uruchomienie któregoś z dostępnych kawałków, wyekstrahuj samo imię i nazwisko / nazwę do pola "query" w open_youtube i ustaw randomTrack: true (lub trackIndex dla konkretnego numeru, np. "wybierz drugi utwór" -> trackIndex: 2). Gdy mówi "wyłącz YouTube" / "wyłącz YouTube i czekaj na inne polecenia", użyj akcji close_youtube i napisz krótką gotowość na dalsze polecenia.
 7. BAJKI, BUDZIKI I POWIADOMIENIA: Dla bajek użyj read_story / continue_story / pause_story. Dla budzików użyj set_alarm lub delete_alarm. Dla powiadomień użyj set_reminder lub delete_reminder.
 
 Akcje UI ("actions"):
-1. navigate (tab: "assistant" | "food" | "stays" | "transit" | "tools", explicit: true)
-2. close_tab (targetTab: opcjonalnie "assistant" | "food" | "stays" | "transit" | "tools")
-3. go_back (steps?: liczba kroków wstecz, domyślnie 1 — cofa artykuł -> wyniki -> zamyka przeglądarkę/okno -> wraca do poprzedniej zakładki)
-4. set_language (language: "pl" | "de")
-5. search_food (category: "all" | "doner" | "pizza" | "chinese" | "near_post", location, country)
-6. search_stays (stayType: "all" | "rooms" | "hotel" | "apartment" | "budget", location, country, minPriceEur, maxPriceEur)
-7. auto_book_stay (location, country, stayName, checkIn, checkOut, guests)
-8. search_transit (mode: "trains" | "sbahn" | "buses" | "car" | "fuel", from, to, country, query)
-9. web_search (query, autoRedirect, codeOnly)
-10. dial (target: nazwa lokalu/kontaktu lub "first")
-11. prepare_whatsapp (message, recipientFilter, phone, sendNow: true jeśli wysłać od razu, autoClose: true aby automatycznie zamknąć okno po wysłaniu, action: "open" | "send" | "close" | "select_all" | "reset")
-12. close_whatsapp (zamyka okno WhatsApp)
-13. read_story (topic) / continue_story / pause_story
-14. set_alarm (time "HH:MM", label) / delete_alarm (time, label, all)
-15. set_reminder (delayMinutes, time, text) / delete_reminder (text, all)
-16. open_youtube (query, service: "youtube" | "youtube_music", trackIndex, randomTrack) / select_youtube_track (trackIndex, randomTrack, nextTrack) / close_youtube
-17. open_browser (query, openExternalChrome) / select_article (articleIndex, readAloud) / close_article / close_browser
-18. open_calculator (expression) / close_calculator
-19. open_notepad / write_note (text) / delete_note (text, all) / close_notepad
-20. open_app (app: "chrome" | "youtube_music" | "youtube" | "whatsapp" | "browser" | "maps" | "spotify" | "booking" | "calendar" | "clock" | "phone" | "calculator" | "notepad", query, contactName)
-21. close_app (app: "whatsapp" | "chrome" | "browser" | "youtube" | "youtube_music" | "calculator" | "notepad" | "phone" | "booking" | "spotify" | "maps" | "calendar" | "clock" | "all")
+1. navigate (tab: "assistant" | "food" | "stays" | "transit", explicit: true)
+2. close_tab (targetTab: opcjonalnie "assistant" | "food" | "stays" | "transit")
+3. set_language (language: "pl" | "de")
+4. search_food (category: "all" | "doner" | "pizza" | "chinese" | "near_post", location, country)
+5. search_stays (stayType: "all" | "hotel" | "apartment" | "budget", location, country)
+6. auto_book_stay (location, country, stayName, checkIn, checkOut, guests)
+7. search_transit (mode: "trains" | "sbahn" | "buses" | "car" | "fuel", from, to, country, query)
+8. web_search (query, autoRedirect, codeOnly)
+9. dial (target: nazwa lokalu/kontaktu lub "first")
+10. prepare_whatsapp (message, recipientFilter)
+11. read_story (topic) / continue_story / pause_story
+12. set_alarm (time "HH:MM", label) / delete_alarm (time, label, all)
+13. set_reminder (delayMinutes, time, text) / delete_reminder (text, all)
+14. open_youtube (query, service: "youtube" | "youtube_music", trackIndex, randomTrack) / select_youtube_track (trackIndex, randomTrack, nextTrack) / close_youtube
+15. open_browser (query, openExternalChrome) / select_article (articleIndex, readAloud) / close_article / close_browser
+16. open_calculator (expression) / close_calculator
+17. open_notepad / write_note (text) / delete_note (text, all) / close_notepad
+18. open_app (app: "chrome" | "youtube_music" | "youtube" | "whatsapp" | "browser" | "maps" | "spotify" | "booking" | "calendar" | "clock" | "phone", query, contactName)
 
 WAŻNE: Dla akcji search_food, search_stays i auto_book_stay ZAWSZE umieszczaj kod pocztowy lub nazwę miasta w polu "location" (nie w "target"), a kraj (np. "PL", "DE", "FR") w polu "country".
-Dla WhatsApp: Gdy użytkownik mówi "wyślij wiadomość na WhatsApp do X: treść" albo "wyślij to i zamknij okno", użyj prepare_whatsapp z sendNow: true oraz autoClose: true! Gdy mówi "zamknij WhatsApp" lub "zamknij okno", użyj close_whatsapp lub close_app.
-W polu "replyText" napisz krótką, szybką odpowiedź w języku ${targetLangName} jako ${personaDesc} (1 zwięzłe zdanie).`,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              replyText: { type: Type.STRING },
-              actions: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    type: {
-                      type: Type.STRING,
-                      description:
-                        'One of: navigate, close_tab, go_back, set_language, search_food, search_stays, auto_book_stay, search_transit, web_search, dial, prepare_whatsapp, close_whatsapp, read_story, continue_story, pause_story, set_alarm, delete_alarm, set_reminder, delete_reminder, open_youtube, select_youtube_track, close_youtube, open_browser, select_article, close_article, close_browser, open_calculator, close_calculator, open_notepad, write_note, delete_note, close_notepad, open_app, close_app',
-                    },
-                    tab: { type: Type.STRING, nullable: true },
-                    targetTab: {
-                      type: Type.STRING,
-                      nullable: true,
-                      description: 'Target tab for close_tab: assistant, food, stays, transit, tools',
-                    },
-                    steps: {
-                      type: Type.INTEGER,
-                      nullable: true,
-                      description: 'Number of steps for go_back (default 1)',
-                    },
-                    explicit: { type: Type.BOOLEAN, nullable: true },
-                    language: { type: Type.STRING, nullable: true },
-                    location: {
-                      type: Type.STRING,
-                      nullable: true,
-                      description: 'Postal code or city for search_food, search_stays, auto_book_stay',
-                    },
-                    country: {
-                      type: Type.STRING,
-                      nullable: true,
-                      description: 'Country code or name (e.g. DE, PL, FR)',
-                    },
-                    category: { type: Type.STRING, nullable: true },
-                    stayType: { type: Type.STRING, nullable: true },
-                    minPriceEur: { type: Type.INTEGER, nullable: true },
-                    maxPriceEur: { type: Type.INTEGER, nullable: true },
-                    stayName: { type: Type.STRING, nullable: true },
-                    checkIn: { type: Type.STRING, nullable: true },
-                    checkOut: { type: Type.STRING, nullable: true },
-                    guests: { type: Type.INTEGER, nullable: true },
-                    mode: {
-                      type: Type.STRING,
-                      nullable: true,
-                      description: 'One of: trains, sbahn, buses, car, fuel',
-                    },
-                    from: { type: Type.STRING, nullable: true },
-                    to: { type: Type.STRING, nullable: true },
-                    target: { type: Type.STRING, nullable: true },
-                    message: { type: Type.STRING, nullable: true },
-                    recipientFilter: { type: Type.STRING, nullable: true },
-                    phone: { type: Type.STRING, nullable: true },
-                    sendNow: { type: Type.BOOLEAN, nullable: true },
-                    autoClose: { type: Type.BOOLEAN, nullable: true },
-                    action: { type: Type.STRING, nullable: true },
-                    topic: { type: Type.STRING, nullable: true },
-                    time: { type: Type.STRING, nullable: true },
-                    label: { type: Type.STRING, nullable: true },
-                    all: { type: Type.BOOLEAN, nullable: true },
-                    delayMinutes: { type: Type.INTEGER, nullable: true },
-                    text: { type: Type.STRING, nullable: true },
-                    expression: { type: Type.STRING, nullable: true },
-                    trackIndex: { type: Type.INTEGER, nullable: true },
-                    randomTrack: { type: Type.BOOLEAN, nullable: true },
-                    nextTrack: { type: Type.BOOLEAN, nullable: true },
-                    articleIndex: { type: Type.INTEGER, nullable: true },
-                    readAloud: { type: Type.BOOLEAN, nullable: true },
-                    openExternalChrome: { type: Type.BOOLEAN, nullable: true },
-                    query: { type: Type.STRING, nullable: true },
-                    service: { type: Type.STRING, nullable: true },
-                    autoRedirect: { type: Type.BOOLEAN, nullable: true },
-                    codeOnly: { type: Type.BOOLEAN, nullable: true },
-                    app: { type: Type.STRING, nullable: true },
-                    contactName: { type: Type.STRING, nullable: true },
-                  },
-                  required: ['type'],
+W polu "replyText" ZAWSZE napisz krótką, konkretną i naturalną odpowiedź w języku ${targetLangName} jako ${personaDesc} (1-2 zwięzłe zdania). Pole "replyText" nie może być puste.`;
+
+      const commandSchema = {
+        type: Type.OBJECT,
+        properties: {
+          replyText: { type: Type.STRING },
+          actions: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                type: {
+                  type: Type.STRING,
+                  description:
+                    'One of: navigate, close_tab, set_language, search_food, search_stays, auto_book_stay, search_transit, web_search, dial, prepare_whatsapp, read_story, continue_story, pause_story, set_alarm, delete_alarm, set_reminder, delete_reminder, open_youtube, select_youtube_track, close_youtube, open_browser, select_article, close_article, close_browser, open_calculator, close_calculator, open_notepad, write_note, delete_note, close_notepad, open_app',
                 },
+                tab: { type: Type.STRING, nullable: true },
+                targetTab: {
+                  type: Type.STRING,
+                  nullable: true,
+                  description: 'Target tab for close_tab: assistant, food, stays, transit',
+                },
+                explicit: { type: Type.BOOLEAN, nullable: true },
+                language: { type: Type.STRING, nullable: true },
+                location: {
+                  type: Type.STRING,
+                  nullable: true,
+                  description: 'Postal code or city for search_food, search_stays, auto_book_stay',
+                },
+                country: {
+                  type: Type.STRING,
+                  nullable: true,
+                  description: 'Country code or name (e.g. DE, PL, FR)',
+                },
+                category: { type: Type.STRING, nullable: true },
+                stayType: { type: Type.STRING, nullable: true },
+                stayName: { type: Type.STRING, nullable: true },
+                checkIn: { type: Type.STRING, nullable: true },
+                checkOut: { type: Type.STRING, nullable: true },
+                guests: { type: Type.INTEGER, nullable: true },
+                mode: {
+                  type: Type.STRING,
+                  nullable: true,
+                  description: 'One of: trains, sbahn, buses, car, fuel',
+                },
+                from: { type: Type.STRING, nullable: true },
+                to: { type: Type.STRING, nullable: true },
+                target: { type: Type.STRING, nullable: true },
+                message: { type: Type.STRING, nullable: true },
+                recipientFilter: { type: Type.STRING, nullable: true },
+                topic: { type: Type.STRING, nullable: true },
+                time: { type: Type.STRING, nullable: true },
+                label: { type: Type.STRING, nullable: true },
+                all: { type: Type.BOOLEAN, nullable: true },
+                delayMinutes: { type: Type.INTEGER, nullable: true },
+                text: { type: Type.STRING, nullable: true },
+                expression: { type: Type.STRING, nullable: true },
+                trackIndex: { type: Type.INTEGER, nullable: true },
+                randomTrack: { type: Type.BOOLEAN, nullable: true },
+                nextTrack: { type: Type.BOOLEAN, nullable: true },
+                articleIndex: { type: Type.INTEGER, nullable: true },
+                readAloud: { type: Type.BOOLEAN, nullable: true },
+                openExternalChrome: { type: Type.BOOLEAN, nullable: true },
+                query: { type: Type.STRING, nullable: true },
+                service: { type: Type.STRING, nullable: true },
+                autoRedirect: { type: Type.BOOLEAN, nullable: true },
+                codeOnly: { type: Type.BOOLEAN, nullable: true },
+                app: { type: Type.STRING, nullable: true },
+                contactName: { type: Type.STRING, nullable: true },
               },
+              required: ['type'],
             },
-            required: ['replyText', 'actions'],
           },
         },
-      });
+        required: ['replyText', 'actions'],
+      };
 
-      const parsed = JSON.parse((response.text ?? '{}').trim());
-      res.json(parsed);
+      const runCommandModel = async (
+        model: 'gemini-3.1-flash-lite' | 'gemini-4-hydrogen',
+        thinkingLevel: ThinkingLevel
+      ) => {
+        return ai.models.generateContent({
+          model,
+          contents: commandPrompt,
+          config: {
+            thinkingConfig: { thinkingLevel },
+            responseMimeType: 'application/json',
+            responseSchema: commandSchema,
+          },
+        });
+      };
+
+      let response;
+      try {
+        response = await runCommandModel('gemini-3.1-flash-lite', ThinkingLevel.MINIMAL);
+      } catch (primaryErr: any) {
+        console.warn(
+          'Command primary model (gemini-3.1-flash-lite) failed, retrying with gemini-4-hydrogen:',
+          primaryErr?.message
+        );
+        response = await runCommandModel('gemini-4-hydrogen', ThinkingLevel.LOW);
+      }
+
+      let parsed = parseModelJsonObject<{ replyText?: string; actions?: any[] }>(response.text);
+      if (!parsed || (!parsed.replyText?.trim() && (!Array.isArray(parsed.actions) || parsed.actions.length === 0))) {
+        try {
+          const fallbackResp = await runCommandModel('gemini-4-hydrogen', ThinkingLevel.LOW);
+          parsed = parseModelJsonObject<{ replyText?: string; actions?: any[] }>(fallbackResp.text);
+        } catch (fallbackErr: any) {
+          console.warn('Command fallback model failed:', fallbackErr?.message);
+        }
+      }
+
+      const actions = Array.isArray(parsed?.actions) ? parsed.actions : [];
+      let replyText = typeof parsed?.replyText === 'string' ? parsed.replyText.trim() : '';
+      if (!replyText && actions.length > 0) {
+        replyText = isDeLang ? 'Ich führe deinen Befehl aus.' : 'Już wykonuję polecenie.';
+      }
+      if (!replyText) {
+        return res.status(502).json({
+          error: isDeLang
+            ? 'Das KI-Modell hat eine leere Antwort zurückgegeben. Bitte versuche es erneut.'
+            : 'Model AI zwrócił pustą odpowiedź. Spróbuj ponownie.',
+        });
+      }
+
+      res.json({ replyText, actions });
     } catch (error: any) {
       const msgStr = String(error?.message || '');
       const isQuota = msgStr.includes('429') || msgStr.includes('RESOURCE_EXHAUSTED');
@@ -4676,134 +4351,105 @@ W polu "replyText" napisz krótką, szybką odpowiedź w języku ${targetLangNam
       const isDe = req.body?.language === 'de';
 
       if (isQuota && cleanT) {
-        const parseFallbackClause = (clauseRaw: string): any | null => {
-          const clause = clauseRaw.trim();
-          const cl = clause.toLowerCase();
-          if (!clause) return null;
-
-          if (/(bajk|story|märchen)/.test(cl)) {
-            return { type: 'read_story', topic: clause };
-          }
-          if (/(chrome|przegl[ąa]dark|browser)/.test(cl)) {
-            if (/(wy[łl][ąa]cz|zamknij|zatrzymaj|schlie[ßs]e|aus|stop)/.test(cl)) {
-              return { type: 'close_browser' };
-            }
-            return { type: 'open_browser', openExternalChrome: /chrome/.test(cl) };
-          }
-          if (/whatsapp/.test(cl)) {
-            if (/(wy[łl][ąa]cz|zamknij|schlie[ßs]e|aus)/.test(cl) && !/(wy[śs]lij|napisz|send|nachricht)/.test(cl)) {
-              return { type: 'close_whatsapp' };
-            }
-            const isSend = /(wy[śs]lij|napisz|powiedz|send|schick)/.test(cl);
-            return {
-              type: 'prepare_whatsapp',
-              sendNow: isSend,
-              autoClose: true,
-              action: isSend ? 'send' : 'open',
-            };
-          }
-          if (/kalkulator|taschenrechner|rechner/.test(cl)) {
-            if (/(wy[łl][ąa]cz|zamknij|schlie[ßs]e|aus)/.test(cl)) {
-              return { type: 'close_calculator' };
-            }
-            return { type: 'open_calculator' };
-          }
-          if (/notatnik|notatk|notizblock/.test(cl)) {
-            if (/(wy[łl][ąa]cz|zamknij|schlie[ßs]e|aus)/.test(cl)) {
-              return { type: 'close_notepad' };
-            }
-            return { type: 'open_notepad' };
-          }
-          if (/youtube/.test(cl)) {
-            if (/(wy[łl][ąa]cz|zamknij|zatrzymaj|schlie[ßs]e|aus|stop)/.test(cl)) {
-              return { type: 'close_youtube' };
-            }
-            const isMusic = /youtube\s*music/.test(cl);
-            const parsedYt = parseYoutubeTrackRequest(clause);
-            return {
-              type: 'open_youtube',
-              service: isMusic ? 'youtube_music' : 'youtube',
-              ...(parsedYt.cleanQuery ? { query: parsedYt.cleanQuery } : {}),
-              ...(parsedYt.trackIdx ? { trackIndex: parsedYt.trackIdx } : {}),
-              ...(parsedYt.isRandomTrack ? { randomTrack: true } : {}),
-            };
-          }
-          if (/^(?:prosz[ęe]\s+)?(?:cofnij(?:\s+(?:okno|stron[ęe]|widok|kart[ęe]|krok))?|wstecz|zurück(?:\s+im\s+fenster)?|go\s+back)[.!?]*$/i.test(clause)) {
-            return { type: 'go_back', steps: 1 };
-          }
-          if (/(cofnij|wstecz|wr[óo][ćc]|wroc|zurück)/.test(cl) && !/(jedzen|nocleg|przejazd|asystent|essen|unterkünf|verkehr)/.test(cl)) {
-            return { type: 'go_back', steps: 1 };
-          }
-          if (/(zamknij|wróć|wroc|cofnij|schließe|zurück)/.test(cl)) {
-            const targetTab = /(nocleg|hotel|unterkünf)/.test(cl)
-              ? 'stays'
-              : /(przejazd|tras|verkehr|esban|s-bahn)/.test(cl)
-                ? 'transit'
-                : /(jedzen|essen)/.test(cl)
-                  ? 'food'
-                  : /(narz[ęe]dzi|tools)/.test(cl)
-                    ? 'tools'
-                    : /(asystent|assistent)/.test(cl)
-                      ? 'assistant'
-                      : undefined;
-            return targetTab ? { type: 'close_tab', targetTab } : { type: 'go_back', steps: 1 };
-          }
-          if (/(pizza|döner|doner|kebab|jedzen|restaurac|essen)/.test(cl)) {
-            const cat = cl.includes('pizza')
-              ? 'pizza'
-              : /kebab|döner|doner/.test(cl)
-                ? 'doner'
-                : 'all';
-            return { type: 'search_food', category: cat };
-          }
-          if (/(nocleg|hotel|pokój|pokoj|zimmer|unterkunft)/.test(cl)) {
-            return { type: 'search_stays', stayType: 'all' };
-          }
-          if (/(esban|s-bahn|sbahn|paliw|stacj|sprit|benzin|diesel|trasa|autem|samochod|auto|pociąg|zug|bus)/.test(cl)) {
-            const mode = /(esban|s-bahn|sbahn)/.test(cl)
-              ? 'sbahn'
-              : /(paliw|sprit|benzin|diesel)/.test(cl)
-                ? 'fuel'
-                : /(autem|samochod|auto|route)/.test(cl)
-                  ? 'car'
-                  : /bus/.test(cl)
-                    ? 'buses'
-                    : 'trains';
-            return { type: 'search_transit', mode, query: clause };
-          }
-          if (/(narz[ęe]dzi|werkzeug|tools)/.test(cl)) {
-            return { type: 'navigate', tab: 'tools', explicit: true };
-          }
-          return null;
-        };
-
-        const rawClauses = cleanT
-          .split(/\s*(?:,|;|\b(?:i|oraz|a\s+potem|potem|nast[ęe]pnie|und|dann)\b)\s*/i)
-          .map((s) => s.trim())
-          .filter(Boolean);
-
-        if (rawClauses.length > 1) {
-          const parsedActions = rawClauses
-            .map((c) => parseFallbackClause(c))
-            .filter(Boolean);
-          if (parsedActions.length > 0) {
-            return res.json({
-              replyText: isDe
-                ? 'Ich habe alle gewünschten Befehle ausgeführt.'
-                : 'Wykonałem wszystkie polecenia.',
-              actions: parsedActions,
-            });
-          }
-        }
-
-        const singleAction = parseFallbackClause(cleanT);
-        if (singleAction) {
+        if (/(bajk|story|märchen)/.test(lower)) {
           return res.json({
-            replyText: isDe ? 'Befehl ausgeführt.' : 'Wykonałem polecenie.',
-            actions: [singleAction],
+            replyText: isDe ? 'Ich erzähle dir ein Märchen.' : 'Już opowiadam bajkę od A do Z.',
+            actions: [{ type: 'read_story', topic: cleanT }],
           });
         }
-
+        if (/(zamknij|wróć|wroc|cofnij|schließe|zurück)/.test(lower)) {
+          const targetTab = /(nocleg|hotel|unterkünf)/.test(lower)
+            ? 'stays'
+            : /(przejazd|tras|verkehr|esban|s-bahn)/.test(lower)
+              ? 'transit'
+              : /(asystent|assistent)/.test(lower)
+                ? 'assistant'
+                : undefined;
+          return res.json({
+            replyText: isDe
+              ? 'Ich schließe den Tab.'
+              : 'Zamykam zakładkę i przechodzę dalej.',
+            actions: [{ type: 'close_tab', ...(targetTab ? { targetTab } : {}) }],
+          });
+        }
+        if (/(chrome|przegl[ąa]dark|browser)/.test(lower)) {
+          if (/(wy[łl][ąa]cz|zamknij|zatrzymaj|schlie[ßs]e|aus)/.test(lower)) {
+            return res.json({
+              replyText: isDe
+                ? 'Ich habe den Browser geschlossen und warte auf weitere Befehle.'
+                : 'Wyłączyłem przeglądarkę. Czekam na kolejne polecenia.',
+              actions: [{ type: 'close_browser' }],
+            });
+          }
+          return res.json({
+            replyText: isDe ? 'Ich öffne den Browser.' : 'Włączam przeglądarkę.',
+            actions: [{ type: 'open_browser', openExternalChrome: /chrome/.test(lower) }],
+          });
+        }
+        if (/youtube/.test(lower)) {
+          if (/(wy[łl][ąa]cz|zamknij|zatrzymaj|schlie[ßs]e|aus|stop)/.test(lower)) {
+            return res.json({
+              replyText: isDe
+                ? 'Ich habe YouTube ausgeschaltet und warte auf weitere Befehle.'
+                : 'Wyłączyłem YouTube. Czekam na kolejne polecenia.',
+              actions: [{ type: 'close_youtube' }],
+            });
+          }
+          const isMusic = /youtube\s*music/.test(lower);
+          const parsedYt = parseYoutubeTrackRequest(cleanT);
+          return res.json({
+            replyText: isDe
+              ? `Ich öffne ${isMusic ? 'YouTube Music' : 'YouTube'}.`
+              : `Uruchamiam ${isMusic ? 'YouTube Music' : 'YouTube'}${parsedYt.cleanQuery ? ` dla ${parsedYt.cleanQuery}` : ''}.`,
+            actions: [
+              {
+                type: 'open_youtube',
+                service: isMusic ? 'youtube_music' : 'youtube',
+                ...(parsedYt.cleanQuery ? { query: parsedYt.cleanQuery } : {}),
+                ...(parsedYt.trackIdx ? { trackIndex: parsedYt.trackIdx } : {}),
+                ...(parsedYt.isRandomTrack ? { randomTrack: true } : {}),
+              },
+            ],
+          });
+        }
+        if (/(pizza|döner|doner|kebab|jedzen|restaurac|essen)/.test(lower)) {
+          const cat = lower.includes('pizza')
+            ? 'pizza'
+            : /kebab|döner|doner/.test(lower)
+              ? 'doner'
+              : 'all';
+          return res.json({
+            replyText: isDe
+              ? 'Ich suche passende Restaurants für dich.'
+              : 'Wyszukuję restauracje w zakładce Jedzenie.',
+            actions: [{ type: 'search_food', category: cat }],
+          });
+        }
+        if (/(nocleg|hotel|pokój|pokoj|zimmer|unterkunft)/.test(lower)) {
+          return res.json({
+            replyText: isDe
+              ? 'Ich öffne die Unterkunftssuche.'
+              : 'Otwieram wyszukiwanie noclegów i pokoi.',
+            actions: [{ type: 'search_stays', stayType: 'all' }],
+          });
+        }
+        if (/(esban|s-bahn|sbahn|paliw|stacj|sprit|benzin|diesel|trasa|autem|samochod|auto|pociąg|zug|bus)/.test(lower)) {
+          const mode = /(esban|s-bahn|sbahn)/.test(lower)
+            ? 'sbahn'
+            : /(paliw|sprit|benzin|diesel)/.test(lower)
+              ? 'fuel'
+              : /(autem|samochod|auto|route)/.test(lower)
+                ? 'car'
+                : /bus/.test(lower)
+                  ? 'buses'
+                  : 'trains';
+          return res.json({
+            replyText: isDe
+              ? 'Ich öffne das Verkehrs- und Kraftstofffenster.'
+              : 'Otwieram okno Przejazdy i sprawdzam dane.',
+            actions: [{ type: 'search_transit', mode, query: cleanT }],
+          });
+        }
         return res.json({
           replyText: isDe
             ? `Ich suche im Web nach „${cleanT}”.`
@@ -4819,11 +4465,11 @@ W polu "replyText" napisz krótką, szybką odpowiedź w języku ${targetLangNam
       }
 
       console.error('Command error:', error);
-      res.status(500).json({
-        error: isQuota
-          ? 'Limit zapytań AI chwilowo przekroczony — spróbuj ponownie za kilka sekund.'
-          : error?.message || 'Nie udało się przetworzyć polecenia głosowego.',
-      });
+      const friendly = formatFriendlyApiError(
+        error,
+        'Nie udało się przetworzyć polecenia głosowego.'
+      );
+      res.status(friendly.status).json({ error: friendly.message });
     }
   });
 
@@ -4837,7 +4483,8 @@ W polu "replyText" napisz krótką, szybką odpowiedź w języku ${targetLangNam
         voiceGender?: string;
         language?: 'pl' | 'de';
       };
-      if (!text?.trim()) {
+      const cleanText = String(text || '').trim();
+      if (!cleanText) {
         return res.status(400).json({ error: 'Brak tekstu do syntezy mowy.' });
       }
 
@@ -4845,18 +4492,19 @@ W polu "replyText" napisz krótką, szybką odpowiedź w języku ${targetLangNam
       const voiceCfg = resolveVoiceConfig(voiceGender);
       const style = language === 'de' ? voiceCfg.ttsStyleDe : voiceCfg.ttsStylePl;
 
-      const synthesizeWithVoice = async (prebuiltVoice: string) => {
+      const synthesizeWithVoice = async (
+        prebuiltVoice: string,
+        includeStyle = true
+      ): Promise<{ audioBase64: string; mimeType: string }> => {
+        const part: any = includeStyle
+          ? { text: cleanText, speechMetadata: { style } }
+          : { text: cleanText };
         const response = await ai.models.generateContent({
           model: 'gemini-3.8-flash-lite-tts',
           contents: [
             {
               role: 'user',
-              parts: [
-                {
-                  text: text.trim(),
-                  speechMetadata: { style },
-                },
-              ],
+              parts: [part],
             },
           ],
           config: {
@@ -4870,103 +4518,120 @@ W polu "replyText" napisz krótką, szybką odpowiedź w języku ${targetLangNam
         });
 
         const parts = response.candidates?.[0]?.content?.parts ?? [];
-        const base64Audio = parts.find((p: any) => p?.inlineData?.data)?.inlineData?.data;
+        const audioPart = parts.find((p: any) => p?.inlineData?.data);
+        const base64Audio = audioPart?.inlineData?.data;
         if (!base64Audio) {
-          throw new Error('Model TTS nie zwrócił danych audio.');
+          throw new Error('Model TTS zwrócił pustą odpowiedź audio.');
         }
-        return base64Audio;
+        return {
+          audioBase64: base64Audio,
+          mimeType: audioPart?.inlineData?.mimeType || 'audio/wav',
+        };
       };
 
       let usedVoice = voiceCfg.voiceName;
-      let base64Audio: string;
+      let result: { audioBase64: string; mimeType: string };
       try {
-        base64Audio = await synthesizeWithVoice(usedVoice);
+        result = await synthesizeWithVoice(usedVoice, true);
       } catch (voiceErr: any) {
+        console.warn(`TTS primary attempt failed (${usedVoice}):`, voiceErr?.message);
         if (usedVoice === 'Orus') {
-          console.warn('TTS voice Orus fallback -> Charon:', voiceErr?.message);
           usedVoice = 'Charon';
-          base64Audio = await synthesizeWithVoice(usedVoice);
+          result = await synthesizeWithVoice(usedVoice, true);
         } else {
-          throw voiceErr;
+          // Retry once without speechMetadata in case style directive caused empty audio
+          result = await synthesizeWithVoice(usedVoice, false);
         }
       }
 
       res.json({
-        audioBase64: base64Audio,
-        mimeType: 'audio/wav',
+        audioBase64: result.audioBase64,
+        mimeType: result.mimeType,
         voiceName: usedVoice,
       });
     } catch (error: any) {
       console.error('TTS error:', error);
-      res.status(500).json({
-        error: error?.message || 'Błąd syntezy głosu Miękiszona.',
-      });
+      const friendly = formatFriendlyApiError(
+        error,
+        'Błąd syntezy głosu Miękiszona.'
+      );
+      res.status(friendly.status).json({ error: friendly.message });
     }
   });
 
   // ---------------------------------------------------------------------------
-  // 7. Audio Transcription (gemini-3.5-transcribe, Polish & German)
+  // 7. Audio Transcription (gemini-3.5-transcribe with gemini-4-hydrogen fallback)
   // ---------------------------------------------------------------------------
   app.post('/api/assistant/transcribe', async (req, res) => {
     try {
-      const { audioBase64, mimeType = 'audio/webm', language = 'pl' } = req.body as {
+      const { audioBase64, mimeType = 'audio/wav', language = 'pl' } = req.body as {
         audioBase64: string;
         mimeType?: string;
         language?: 'pl' | 'de';
       };
-      if (!audioBase64) {
-        return res.status(400).json({ error: 'Brak nagrania audio.' });
+      if (!audioBase64 || typeof audioBase64 !== 'string' || audioBase64.length < 32) {
+        return res.status(400).json({ error: 'Brak lub zbyt krótkie nagranie audio.' });
       }
 
       const ai = getAiClient();
+      const cleanMimeType = normalizeAudioMimeType(mimeType);
       const transcribePrompt =
         language === 'de'
-          ? 'Transkribiere diese Sprachaufnahme exakt (Deutsch oder Polnisch, je nach gesprochener Sprache). Gib nur den reinen Text ohne Kommentare zurück.'
-          : 'Transkrybuj dokładnie tę wypowiedź (po polsku lub po niemiecku, zależnie od mowy). Zwróć sam tekst bez komentarzy.';
+          ? 'Transkribiere diese Sprachaufnahme exakt (Deutsch oder Polnisch, je nach gesprochener Sprache). Gib nur den reinen gesprochenen Text ohne Kommentare zurück. Wenn nur Stille oder Rauschen zu hören ist, gib einen leeren Text zurück.'
+          : 'Transkrybuj dokładnie tę wypowiedź (po polsku lub po niemiecku, zależnie od mowy). Zwróć sam wypowiedziany tekst bez komentarzy. Jeśli słychać wyłącznie ciszę lub szum, zwróć pusty tekst.';
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.5-transcribe',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType,
-                data: audioBase64,
+      const runTranscribe = (model: 'gemini-3.5-transcribe' | 'gemini-4-hydrogen') =>
+        ai.models.generateContent({
+          model,
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: cleanMimeType,
+                  data: audioBase64,
+                },
               },
-            },
-            {
-              text: transcribePrompt,
-            },
-          ],
-        },
-      });
+              {
+                text: transcribePrompt,
+              },
+            ],
+          },
+          ...(model === 'gemini-4-hydrogen'
+            ? { config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } }
+            : {}),
+        });
 
-      res.json({ text: (response.text ?? '').trim() });
+      let response;
+      try {
+        response = await runTranscribe('gemini-3.5-transcribe');
+      } catch (primaryErr: any) {
+        console.warn(
+          'Transcribe primary model (gemini-3.5-transcribe) failed, retrying with gemini-4-hydrogen:',
+          primaryErr?.message
+        );
+        response = await runTranscribe('gemini-4-hydrogen');
+      }
+
+      const rawText = (response.text ?? '').trim();
+      const cleanedText = /^(\[?\s*(cisza|szum|brak mowy|silence|no speech|stille)\s*\]?|\.{2,})$/i.test(
+        rawText
+      )
+        ? ''
+        : rawText;
+
+      res.json({
+        text: cleanedText,
+        empty: !cleanedText,
+      });
     } catch (error: any) {
       console.error('Transcribe error:', error);
-      res.status(500).json({
-        error: error?.message || 'Błąd transkrypcji nagrania.',
-      });
+      const friendly = formatFriendlyApiError(
+        error,
+        'Błąd transkrypcji nagrania głosowego.'
+      );
+      res.status(friendly.status).json({ error: friendly.message });
     }
   });
-
-  return { app, useStaticDist, distDir, distIndexPath };
-}
-
-let cachedVercelApp: express.Express | null = null;
-
-export function getVercelApp(): express.Express {
-  if (cachedVercelApp) return cachedVercelApp;
-  const { app } = createApiApp();
-  app.use('/api/*', (_req, res) => {
-    res.status(404).json({ error: 'API endpoint not found' });
-  });
-  cachedVercelApp = app;
-  return cachedVercelApp;
-}
-
-async function startServer() {
-  const { app, useStaticDist, distDir, distIndexPath } = createApiApp();
 
   // ---------------------------------------------------------------------------
   // Vite Middleware (Dev) or Static Assets (Prod) + WebSocket Live API
@@ -5037,42 +4702,28 @@ async function startServer() {
     {
       name: 'navigateToTab',
       description:
-        'Przełącza widok gdy użytkownik poprosi o otwarcie konkretnej zakładki (assistant = Asystent, food = Jedzenie, stays = Noclegi, transit = Przejazdy, tools = Narzędzia). Podczas zwykłej rozmowy o jedzeniu pozostań w zakładce Jedzenie; przełączaj z niej tylko wtedy, gdy użytkownik wyraźnie poprosi o powrót lub przejście do innej zakładki.',
+        'Przełącza widok gdy użytkownik poprosi o otwarcie konkretnej zakładki (assistant = Asystent, food = Jedzenie, stays = Noclegi, transit = Przejazdy). Podczas zwykłej rozmowy o jedzeniu pozostań w zakładce Jedzenie; przełączaj z niej tylko wtedy, gdy użytkownik wyraźnie poprosi o powrót lub przejście do innej zakładki.',
       parameters: {
         type: Type.OBJECT,
         properties: {
           tab: {
             type: Type.STRING,
-            description: 'Jedna z zakładek: assistant, food, stays, transit, tools',
+            description: 'Jedna z zakładek: assistant, food, stays, transit',
           },
         },
         required: ['tab'],
       },
     },
     {
-      name: 'goBackWindow',
-      description:
-        'Masz pełne uprawnienia: cofa aktywne okno, stronę w przeglądarce, okno modalne lub wraca do poprzednio otwartej zakładki (np. na polecenie "cofnij okno", "cofnij", "wstecz", "zurück"). Może cofnąć o 1 lub więcej kroków (steps).',
-      parameters: {
-        type: Type.OBJECT,
-        properties: {
-          steps: {
-            type: Type.INTEGER,
-            description: 'Liczba kroków wstecz (domyślnie 1).',
-          },
-        },
-      },
-    },
-    {
       name: 'closeOrReturnTab',
       description:
-        'Zamyka bieżącą zakładkę lub okno (np. Jedzenie, Noclegi, Przejazdy, Narzędzia) i wraca do poprzedniego widoku albo od razu przechodzi do wskazanej przez użytkownika zakładki (targetTab).',
+        'Zamyka bieżącą zakładkę lub okno (np. Jedzenie, Noclegi, Przejazdy) i wraca do poprzedniego widoku albo od razu przechodzi do wskazanej przez użytkownika zakładki (targetTab).',
       parameters: {
         type: Type.OBJECT,
         properties: {
           targetTab: {
             type: Type.STRING,
-            description: 'Opcjonalna docelowa zakładka: assistant, food, stays, transit, tools',
+            description: 'Opcjonalna docelowa zakładka: assistant, food, stays, transit',
           },
         },
       },
@@ -5105,15 +4756,13 @@ async function startServer() {
     {
       name: 'searchStaysGermany',
       description:
-        'Wyszukuje pokoje i noclegi (pokoje gościnne, Privatzimmer, Monteurzimmer, hotele, apartamenty, Booking/Airbnb) po kodzie pocztowym lub mieście oraz opcjonalnie filtruje po cenie EUR za noc.',
+        'Wyszukuje noclegi (hotele, apartamenty, pokoje, Booking/Airbnb) po kodzie pocztowym lub mieście w Niemczech i innych krajach oraz otwiera zakładkę Noclegi.',
       parameters: {
         type: Type.OBJECT,
         properties: {
           location: { type: Type.STRING, description: 'Kod pocztowy lub miasto (niemieckie kody bez myślników).' },
           country: { type: Type.STRING, description: 'Opcjonalny kraj (np. DE, PL, AT, FR).' },
-          stayType: { type: Type.STRING, description: 'all, rooms, hotel, apartment, budget' },
-          minPriceEur: { type: Type.INTEGER, description: 'Opcjonalna minimalna cena za noc w EUR' },
-          maxPriceEur: { type: Type.INTEGER, description: 'Opcjonalna maksymalna cena za noc w EUR' },
+          stayType: { type: Type.STRING, description: 'all, hotel, apartment, budget' },
         },
         required: ['stayType'],
       },
@@ -5183,29 +4832,14 @@ async function startServer() {
     {
       name: 'prepareWhatsappMessage',
       description:
-        'Pełne sterowanie WhatsApp: otwiera okno WhatsApp, wpisuje treść, wysyła wiadomość do wskazanego kontaktu lub numeru (sendNow=true) i automatycznie zamyka okno po wysłaniu (autoClose=true), albo zamyka okno WhatsApp (action="close").',
+        'Przygotowuje i uruchamia wysłanie wiadomości WhatsApp do wybranej osoby lub grupy bez potrzeby osobnej zakładki.',
       parameters: {
         type: Type.OBJECT,
         properties: {
-          action: {
-            type: Type.STRING,
-            description: 'open | send | close | select_all | reset',
-          },
-          message: { type: Type.STRING, description: 'Treść wiadomości do wysłania.' },
-          recipientFilter: {
-            type: Type.STRING,
-            description: 'Imię odbiorcy, numer telefonu lub "all".',
-          },
-          phone: { type: Type.STRING, description: 'Opcjonalny numer telefonu odbiorcy.' },
-          sendNow: {
-            type: Type.BOOLEAN,
-            description: 'Ustaw true gdy użytkownik poleca wysłać wiadomość teraz.',
-          },
-          autoClose: {
-            type: Type.BOOLEAN,
-            description: 'Domyślnie true: automatycznie zamyka okno WhatsApp po wysłaniu wiadomości.',
-          },
+          message: { type: Type.STRING, description: 'Treść wiadomości po polsku.' },
+          recipientFilter: { type: Type.STRING, description: 'Nazwa odbiorcy lub "all".' },
         },
+        required: ['message'],
       },
     },
     {
@@ -5362,7 +4996,7 @@ async function startServer() {
     {
       name: 'closeBrowser',
       description:
-        'Masz pełne uprawnienia systemowe: wyłącza / zamyka okno przeglądarki w aplikacji oraz ewentualny baner Chrome poprzez połączenie głosowe, pozostawiając asystenta aktywnego i gotowego na dalsze lub kolejne polecenia.',
+        'Wyłącza / zamyka przeglądarkę (oraz okna zewnętrzne) poprzez połączenie głosowe, pozostawiając asystenta aktywnego i gotowego na dalsze polecenia.',
       parameters: {
         type: Type.OBJECT,
         properties: {},
@@ -5397,33 +5031,17 @@ async function startServer() {
     {
       name: 'openPhoneApp',
       description:
-        'Masz pełne uprawnienia do uruchamiania aplikacji w telefonie i oknie asystenta: chrome, youtube_music, youtube, whatsapp, browser, maps, phone, clock, booking, spotify, calendar, calculator, notepad.',
+        'Masz pełne uprawnienia do uruchamiania aplikacji w telefonie: chrome (Google Chrome), youtube_music (YouTube Music), youtube (YouTube), whatsapp, browser, maps, phone, clock, booking, spotify, calendar.',
       parameters: {
         type: Type.OBJECT,
         properties: {
           app: {
             type: Type.STRING,
             description:
-              'chrome | youtube_music | youtube | whatsapp | browser | maps | phone | clock | booking | spotify | calendar | calculator | notepad',
+              'chrome | youtube_music | youtube | whatsapp | browser | maps | phone | clock | booking | spotify | calendar',
           },
           query: { type: Type.STRING, description: 'Opcjonalne zapytanie lub adres URL' },
-          contactName: { type: Type.STRING, description: 'Opcjonalne imię kontaktu dla WhatsApp/Telefonu' },
-        },
-        required: ['app'],
-      },
-    },
-    {
-      name: 'closePhoneApp',
-      description:
-        'Zamyka otwartą aplikację lub okno w asystencie: whatsapp, chrome, browser, youtube, youtube_music, calculator, notepad, phone, booking, spotify, maps, calendar, clock lub "all" (wszystkie okna).',
-      parameters: {
-        type: Type.OBJECT,
-        properties: {
-          app: {
-            type: Type.STRING,
-            description:
-              'whatsapp | chrome | browser | youtube | youtube_music | calculator | notepad | phone | booking | spotify | maps | calendar | clock | all',
-          },
+          contactName: { type: Type.STRING, description: 'Opcjonalne imię kontaktu dla WhatsApp' },
         },
         required: ['app'],
       },
@@ -5433,7 +5051,13 @@ async function startServer() {
   wss.on('connection', async (clientWs: WebSocket, req) => {
     let liveSession: any = null;
     let isSessionReady = false;
-    const pendingMessages: Array<{ audio?: string; video?: string; text?: string }> = [];
+    let clientClosed = false;
+    const pendingMessages: Array<{
+      type?: string;
+      audio?: string;
+      video?: string;
+      text?: string;
+    }> = [];
 
     const reqUrl = new URL(req.url || '/api/live', 'http://localhost');
     const voiceCfg = resolveVoiceConfig(reqUrl.searchParams.get('voice'));
@@ -5441,9 +5065,19 @@ async function startServer() {
     const voiceName = voiceCfg.voiceName;
     const personaInstruction = langParam === 'de' ? voiceCfg.personaDe : voiceCfg.personaPl;
 
+    const sendToClient = (payload: Record<string, any>) => {
+      if (!clientClosed && clientWs.readyState === WebSocket.OPEN) {
+        try {
+          clientWs.send(JSON.stringify(payload));
+        } catch {
+          // ignore send on closing socket
+        }
+      }
+    };
+
     // WebSocket keepalive ping to keep long-lived mobile/browser voice sessions stable over proxies
     const pingTimer = setInterval(() => {
-      if (clientWs.readyState === WebSocket.OPEN) {
+      if (!clientClosed && clientWs.readyState === WebSocket.OPEN) {
         try {
           clientWs.ping();
         } catch {
@@ -5452,25 +5086,42 @@ async function startServer() {
       }
     }, 15000);
 
+    const dispatchInputToLive = (msg: {
+      type?: string;
+      audio?: string;
+      video?: string;
+      text?: string;
+    }) => {
+      if (!liveSession || !isSessionReady) return;
+      try {
+        if (msg.type === 'audio_end') {
+          liveSession.sendRealtimeInput({ audioStreamEnd: true });
+        } else if (msg.audio) {
+          liveSession.sendRealtimeInput({
+            audio: { data: msg.audio, mimeType: 'audio/pcm;rate=16000' },
+          });
+        } else if (msg.video) {
+          liveSession.sendRealtimeInput({
+            video: { data: msg.video, mimeType: 'image/jpeg' },
+          });
+        } else if (msg.text) {
+          liveSession.sendRealtimeInput({ text: msg.text });
+        }
+      } catch (sendErr: any) {
+        console.warn('Live sendRealtimeInput error:', sendErr?.message);
+        const friendly = formatFriendlyApiError(
+          sendErr,
+          'Błąd przesyłania głosu do sesji Gemini Live.'
+        );
+        sendToClient({ type: 'error', status: friendly.status, message: friendly.message });
+      }
+    };
+
     const flushPending = () => {
       if (!liveSession || !isSessionReady) return;
       while (pendingMessages.length > 0) {
         const msg = pendingMessages.shift()!;
-        try {
-          if (msg.audio) {
-            liveSession.sendRealtimeInput({
-              audio: { data: msg.audio, mimeType: 'audio/pcm;rate=16000' },
-            });
-          } else if (msg.video) {
-            liveSession.sendRealtimeInput({
-              video: { data: msg.video, mimeType: 'image/jpeg' },
-            });
-          } else if (msg.text) {
-            liveSession.sendRealtimeInput({ text: msg.text });
-          }
-        } catch {
-          // ignore send errors on closing session
-        }
+        dispatchInputToLive(msg);
       }
     };
 
@@ -5478,34 +5129,16 @@ async function startServer() {
       try {
         const msg = JSON.parse(raw.toString());
         if (msg?.type === 'ping') {
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
-          }
+          sendToClient({ type: 'pong', ts: Date.now() });
           return;
         }
         if (!liveSession || !isSessionReady) {
-          if (pendingMessages.length < 30) {
+          if (pendingMessages.length < 40) {
             pendingMessages.push(msg);
           }
           return;
         }
-        if (msg.audio) {
-          liveSession.sendRealtimeInput({
-            audio: {
-              data: msg.audio,
-              mimeType: 'audio/pcm;rate=16000',
-            },
-          });
-        } else if (msg.video) {
-          liveSession.sendRealtimeInput({
-            video: {
-              data: msg.video,
-              mimeType: 'image/jpeg',
-            },
-          });
-        } else if (msg.text) {
-          liveSession.sendRealtimeInput({ text: msg.text });
-        }
+        dispatchInputToLive(msg);
       } catch (err) {
         console.error('Client WS message parse error:', err);
       }
@@ -5530,26 +5163,20 @@ async function startServer() {
           tools: [{ functionDeclarations: liveTools }],
           systemInstruction:
             langParam === 'de'
-              ? `${personaInstruction} Antworte blitzschnell, direkt und maximal in einem kurzen Satz und rufe sofort das passende Tool auf! DU HAST VOLLE SYSTEMBERECHTIGUNGEN in dieser App: Du darfst jederzeit ohne Rückfrage den Browser schließen (closeBrowser), Fenster/Tabs/Browserseiten schrittweise zurücksetzen (goBackWindow), beliebige andere oder verkettete Befehle hintereinander durch mehrere Tool-Aufrufe in derselben Antwort ausführen (z. B. zuerst closeBrowser, dann goBackWindow, dann openYouTubeMusic / manageCalculator / searchFoodGermany / openPhoneApp). Außerdem suchst du Essen (searchFoodGermany), Zimmer & Unterkünfte inkl. Preisfilter (searchStaysGermany mit stayType="rooms" und minPriceEur/maxPriceEur, autoBookStay), Websuche/Artikel im Sprachbrowser (openBrowser, searchWebAndPlaces, selectBrowserArticle, closeArticle) sowie Verkehr (Züge, S-Bahn mode="sbahn", Busse, Autoroute, Kraftstoffpreise) per checkTransitOrFuel weltweit nach Postleitzahl oder Stadt. WICHTIG: Bei deutschen Postleitzahlen ("w Niemczech", "Deutschland", "DE", "PLZ") IMMER alle Bindestriche entfernen (z. B. 10-115 -> 10115) und country="DE" setzen. WHATSAPP & APPS: prepareWhatsappMessage (sendNow=true, autoClose=true), openPhoneApp und closePhoneApp. Du steuerst YouTube (openYouTubeMusic, selectYouTubeTrack, closeYouTube), Rechner (manageCalculator), Notizblock (manageNotepad) sowie Wecker & Erinnerungen (setAlarm, deleteAlarm, setReminder, deleteReminder). MÄRCHEN-REGEL: tellOrContinueStory(action="start"|"continue"). Bleibe beim Suchen im aktuellen Tab.`
-              : `${personaInstruction} Reaguj błyskawicznie w czasie rzeczywym: odpowiadaj maksymalnie 1 krótkim zdaniem i natychmiast wywołuj odpowiednie narzędzie! MASZ PEŁNE UPRAWNIENIA SYSTEMOWE w aplikacji: zawsze bez pytania o potwierdzenie wykonuj polecenia użytkownika, w szczególności zamykanie przeglądarki (closeBrowser), cofanie okna/zakładki/strony (goBackWindow) oraz wykonywanie kolejnych lub dowolnych innych poleceń (możesz wywołać kilka narzędzi jedno po drugim w tej samej turze, np. najpierw closeBrowser, potem goBackWindow, a potem openYouTubeMusic / manageCalculator / searchFoodGermany / openPhoneApp). Wyszukujesz też jedzenie (searchFoodGermany), pokoje i noclegi wraz z filtrowaniem cenowym (searchStaysGermany ze stayType="rooms" oraz minPriceEur/maxPriceEur, autoBookStay), artykuły i informacje w przeglądarce (openBrowser, searchWebAndPlaces, selectBrowserArticle, closeArticle) oraz przejazdy — pociągi, S-Bahn / esbany (mode="sbahn"), autobusy, trasę autem i ceny paliw (checkTransitOrFuel) po kodzie pocztowym lub mieście w Niemczech ORAZ innych krajach. WAŻNE: Dla niemieckiego kodu pocztowego ZAWSZE usuń myślniki (10-115 -> 10115) i podaj country="DE". STEROWANIE WHATSAPP I APLIKACJAMI: prepareWhatsappMessage (sendNow=true, autoClose=true), openPhoneApp i closePhoneApp. Obsługujesz też YouTube (openYouTubeMusic, selectYouTubeTrack, closeYouTube), przeglądarkę (openBrowser, closeBrowser), kalkulator (manageCalculator), notatnik (manageNotepad) oraz budziki i powiadomienia (setAlarm, deleteAlarm, setReminder, deleteReminder). ZASADA DLA BAJKI: tellOrContinueStory(action="start"|"continue"). Podczas rozmowy w zakładce "food", "stays" lub "transit" POZOSTAŃ w niej.`,
+              ? `${personaInstruction} Antworte blitzschnell, direkt und maximal in einem kurzen Satz und rufe sofort das passende Tool auf! Du suchst Essen (searchFoodGermany), Unterkünfte & Zimmer (searchStaysGermany, autoBookStay), allgemeine Websuche/Artikel (openBrowser, searchWebAndPlaces, selectBrowserArticle, closeArticle) sowie Verkehr (Züge, S-Bahn mode="sbahn", Busse, Autoroute, Kraftstoffpreise) per checkTransitOrFuel weltweit nach Postleitzahl oder Stadt. WICHTIG: Bei deutschen Postleitzahlen ("w Niemczech", "Deutschland", "DE", "PLZ") IMMER alle Bindestriche entfernen (z. B. 10-115 -> 10115) und country="DE" setzen. Du steuerst YouTube inkl. Schauspieler-/Künstlersuche (openYouTubeMusic mit sauberem Namen in query und randomTrack=true oder trackIndex=2), Titelwechsel (selectYouTubeTrack) und Ausschalten von YouTube (closeYouTube), sowie den Sprachbrowser: Browser öffnen (openBrowser), Artikel suchen (openBrowser/searchWebAndPlaces), Artikel öffnen/vorlesen (selectBrowserArticle) und Browser per Sprachverbindung ausschalten (closeBrowser, während du aktiv bleibst und auf weitere Befehle wartest). Außerdem öffnest/schließt du den Rechner (manageCalculator), schreibst/löschst im Notizblock (manageNotepad), und stellst/löschst Wecker & Erinnerungen (setAlarm, deleteAlarm, setReminder, deleteReminder). MÄRCHEN-REGEL: Wenn der Nutzer ein Märchen möchte, rufe sofort tellOrContinueStory(action="start") auf; wenn er währenddessen unterbricht und später "weiter"/"kontynuuj" sagt, rufe tellOrContinueStory(action="continue") auf — so läuft das Märchen von A bis Z absolut flüssig ohne lange Pausen! Bleibe beim Suchen im aktuellen Tab.`
+              : `${personaInstruction} Reaguj błyskawicznie w czasie rzeczywym: odpowiadaj maksymalnie 1 krótkim zdaniem i natychmiast wywołuj odpowiednie narzędzie! Wyszukujesz jedzenie (searchFoodGermany), noclegi i pokoje (searchStaysGermany, autoBookStay), artykuły i informacje w przeglądarce (openBrowser, searchWebAndPlaces, selectBrowserArticle, closeArticle) oraz przejazdy — pociągi, S-Bahn / esbany (mode="sbahn"), autobusy, trasę autem i ceny paliw (checkTransitOrFuel) po kodzie pocztowym lub mieście w Niemczech ORAZ innych krajach. WAŻNE: Dla niemieckiego kodu pocztowego ZAWSZE usuń myślniki (10-115 -> 10115) i podaj country="DE". Sterujesz głosowo przeglądarką: włączasz ją narzędziem openBrowser, wyszukujesz wskazane artykuły (openBrowser z query lub searchWebAndPlaces), otwierasz/czytasz wybrany artykuł (selectBrowserArticle), oraz wyłączasz przeglądarkę w trakcie połączenia głosowego narzędziem closeBrowser — pozostając gotowym na kolejne polecenia! Obsługujesz też YouTube z wyszukiwaniem po podanym aktorze/wykonawcy (openYouTubeMusic z czystym nazwiskiem aktora w query oraz randomTrack=true lub trackIndex), przełączasz utwór (selectYouTubeTrack), wyłączasz YouTube (closeYouTube), uruchamiasz/zamykasz kalkulator (manageCalculator), otwierasz notatnik i wpisujesz do niego tekst (manageNotepad), a także ustawiasz i usuwasz budziki oraz powiadomienia (setAlarm, deleteAlarm, setReminder, deleteReminder). ZASADA DLA BAJKI: Gdy użytkownik poprosi o bajkę, ZAWSZE wywołaj tellOrContinueStory(action="start") — wtedy bajka zostanie płynnie opowiedziana od A do Z! Gdy przerwie i powie "kontynuuj", wywołaj tellOrContinueStory(action="continue"). Podczas rozmowy w zakładce "food", "stays" lub "transit" POZOSTAŃ w niej.`,
         },
         callbacks: {
           onopen: () => {
-            isSessionReady = true;
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({ type: 'ready', voice: voiceCfg.id }));
-            }
+            // Do NOT send { type: 'ready' } here: @google/genai still waits for setupComplete.
+            // Sending ready before setupComplete hides auth/model setup errors from the client.
           },
           onmessage: (message: LiveServerMessage) => {
-            if (clientWs.readyState !== WebSocket.OPEN) return;
+            if (clientClosed || clientWs.readyState !== WebSocket.OPEN) return;
 
             if ((message as any).goAway) {
               isSessionReady = false;
-              try {
-                clientWs.send(JSON.stringify({ type: 'reconnect_needed' }));
-              } catch {
-                // ignore
-              }
+              sendToClient({ type: 'reconnect_needed' });
               try {
                 clientWs.close(4001, 'live_go_away');
               } catch {
@@ -5560,49 +5187,51 @@ async function startServer() {
 
             const content = message.serverContent;
             if (content?.inputTranscription?.text) {
-              clientWs.send(
-                JSON.stringify({
-                  type: 'input_transcript',
-                  text: content.inputTranscription.text,
-                })
-              );
+              sendToClient({
+                type: 'input_transcript',
+                text: content.inputTranscription.text,
+              });
             }
             if (content?.outputTranscription?.text) {
-              clientWs.send(
-                JSON.stringify({
-                  type: 'output_transcript',
-                  text: content.outputTranscription.text,
-                })
-              );
+              sendToClient({
+                type: 'output_transcript',
+                text: content.outputTranscription.text,
+              });
             }
 
             for (const part of content?.modelTurn?.parts ?? []) {
               if (part.inlineData?.data) {
-                clientWs.send(
-                  JSON.stringify({
-                    type: 'audio',
-                    audio: part.inlineData.data,
-                  })
-                );
+                const mime = part.inlineData.mimeType || 'audio/pcm;rate=24000';
+                const rateMatch = /rate=(\d+)/i.exec(mime);
+                const sampleRate = rateMatch ? Number(rateMatch[1]) : 24000;
+                sendToClient({
+                  type: 'audio',
+                  audio: part.inlineData.data,
+                  mimeType: mime,
+                  sampleRate: Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : 24000,
+                });
+              } else if (part.text && !(part as any).thought) {
+                sendToClient({
+                  type: 'output_text',
+                  text: part.text,
+                });
               }
             }
 
             if (content?.interrupted) {
-              clientWs.send(JSON.stringify({ type: 'interrupted' }));
+              sendToClient({ type: 'interrupted' });
             }
 
-            if (content?.turnComplete) {
-              clientWs.send(JSON.stringify({ type: 'turn_complete' }));
+            if (content?.turnComplete || (content as any)?.generationComplete) {
+              sendToClient({ type: 'turn_complete' });
             }
 
             for (const call of message.toolCall?.functionCalls ?? []) {
-              clientWs.send(
-                JSON.stringify({
-                  type: 'tool_action',
-                  name: call.name,
-                  args: call.args || {},
-                })
-              );
+              sendToClient({
+                type: 'tool_action',
+                name: call.name,
+                args: call.args || {},
+              });
 
               if (liveSession && isSessionReady) {
                 try {
@@ -5626,32 +5255,52 @@ async function startServer() {
           },
           onerror: (err: any) => {
             console.error('Gemini Live error:', err);
+            // If setup has not completed yet, let connectLiveUpstream catch/fallback handle it cleanly.
+            if (!isSessionReady) return;
             isSessionReady = false;
             liveSession = null;
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(
-                JSON.stringify({
-                  type: 'error',
-                  message: err?.message || 'Błąd połączenia głosowego Gemini Live.',
-                })
-              );
-              try {
-                clientWs.close(4002, 'live_upstream_error');
-              } catch {
-                // ignore
-              }
+            const friendly = formatFriendlyApiError(
+              err,
+              'Błąd połączenia głosowego Gemini Live.'
+            );
+            sendToClient({
+              type: 'error',
+              status: friendly.status,
+              message: friendly.message,
+            });
+            try {
+              clientWs.close(4002, 'live_upstream_error');
+            } catch {
+              // ignore
             }
           },
-          onclose: () => {
+          onclose: (ev: any) => {
+            // During initial connect before setupComplete, let connectLiveUpstream reject & report real cause.
+            if (!isSessionReady) return;
             isSessionReady = false;
             liveSession = null;
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({ type: 'closed' }));
-              try {
-                clientWs.close(4002, 'live_upstream_closed');
-              } catch {
-                // ignore
-              }
+            if (clientClosed || clientWs.readyState !== WebSocket.OPEN) return;
+
+            const closeCode = Number(ev?.code || 1000);
+            const closeReason = String(ev?.reason || '').trim();
+            if (closeCode !== 1000 && closeCode !== 1001) {
+              const friendly = formatFriendlyApiError(
+                { message: closeReason || `Upstream close code ${closeCode}` },
+                `Połączenie z Gemini Live zostało przerwane (kod ${closeCode}).`
+              );
+              sendToClient({
+                type: 'error',
+                status: friendly.status,
+                code: closeCode,
+                message: friendly.message,
+              });
+            } else {
+              sendToClient({ type: 'closed', code: closeCode });
+            }
+            try {
+              clientWs.close(4002, 'live_upstream_closed');
+            } catch {
+              // ignore
             }
           },
         },
@@ -5659,14 +5308,16 @@ async function startServer() {
     };
 
     try {
-      const candidateModels = ['gemini-3.8-live', 'gemini-2.5-flash-native-audio-preview-12-2024'];
+      const candidateModels = ['gemini-3.8-live'];
       const candidateVoices = voiceName === 'Orus' ? ['Orus', 'Charon'] : [voiceName];
       let lastConnectErr: any = null;
+      let connectedModel = 'gemini-3.8-live';
 
       outer: for (const candidateModel of candidateModels) {
         for (const candidateVoice of candidateVoices) {
           try {
             liveSession = await connectLiveUpstream(candidateVoice, candidateModel);
+            connectedModel = candidateModel;
             lastConnectErr = null;
             break outer;
           } catch (connectErr: any) {
@@ -5683,24 +5334,34 @@ async function startServer() {
         throw lastConnectErr || new Error('Nie udało się uruchomić sesji głosowej Gemini Live.');
       }
 
-      if (!isSessionReady) {
-        isSessionReady = true;
-        if (clientWs.readyState === WebSocket.OPEN) {
-          clientWs.send(JSON.stringify({ type: 'ready', voice: voiceCfg.id }));
+      if (clientClosed || clientWs.readyState !== WebSocket.OPEN) {
+        try {
+          liveSession.close();
+        } catch {
+          // ignore
         }
+        liveSession = null;
+        return;
       }
+
+      isSessionReady = true;
+      sendToClient({ type: 'ready', voice: voiceCfg.id, model: connectedModel });
       flushPending();
     } catch (error: any) {
       console.error('Live connect error:', error);
       isSessionReady = false;
       liveSession = null;
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(
-          JSON.stringify({
-            type: 'error',
-            message: error?.message || 'Nie udało się uruchomić sesji głosowej Miekiszona.',
-          })
-        );
+      const friendly = formatFriendlyApiError(
+        error,
+        'Nie udało się uruchomić sesji głosowej Miękiszona.'
+      );
+      sendToClient({
+        type: 'error',
+        status: friendly.status,
+        fatal: friendly.status === 400 || friendly.status === 401 || friendly.status === 403 || friendly.status === 404,
+        message: friendly.message,
+      });
+      if (!clientClosed && clientWs.readyState === WebSocket.OPEN) {
         try {
           clientWs.close(4002, 'live_connect_failed');
         } catch {
@@ -5710,6 +5371,7 @@ async function startServer() {
     }
 
     clientWs.on('close', () => {
+      clientClosed = true;
       clearInterval(pingTimer);
       pendingMessages.length = 0;
       isSessionReady = false;
@@ -5749,10 +5411,7 @@ async function startServer() {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-const isVercelRuntime = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
-if (!isVercelRuntime) {
-  startServer().catch((err) => {
-    console.error('Fatal server startup error:', err);
-    process.exit(1);
-  });
-}
+startServer().catch((err) => {
+  console.error('Fatal server startup error:', err);
+  process.exit(1);
+});
